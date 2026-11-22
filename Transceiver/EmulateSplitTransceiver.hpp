@@ -35,6 +35,9 @@ public:
                                     std::unique_ptr<Transceiver> wrapped,
                                     QObject * parent = nullptr);
 
+  static QString hardware_split_error ();
+  void wait_for_hardware_simplex () { waiting_for_simplex_ = true; }
+
   void set (TransceiverState const&,
             unsigned sequence_number) noexcept override;
 
@@ -58,6 +61,7 @@ private:
   Frequency tx_frequency_;        // requested Tx frequency
   bool split_; // requested split state
   bool tx_requested_ = false;
+  bool waiting_for_simplex_ = false;
   Frequency frequency_resolution_ = 1;
   RigFrequency::Request emulated_tx_;
   RigFrequency::Request logical_rx_;

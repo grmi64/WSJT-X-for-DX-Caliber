@@ -11,6 +11,41 @@ class TestRadioModePolicy final : public QObject
   using State = RadioModePolicy::State;
 
 private slots:
+  void hardwareSplitRecoveryRequiresFreshMatchingSimplexReadback ()
+  {
+    RadioModePolicy policy;
+    policy.configure (Transceiver::DIG_U);
+    policy.prepare (10);
+    policy.hold_for_hardware_split ();
+    QVERIFY (policy.yielded ());
+
+    policy.observe ({Transceiver::DIG_U, Kind::Observed}, 9);
+    policy.confirm_idle_simplex (Transceiver::DIG_U);
+    QVERIFY (policy.yielded ());
+    policy.observe ({Transceiver::DIG_U, Kind::Applied}, 10);
+    policy.confirm_idle_simplex (Transceiver::DIG_U);
+    QVERIFY (policy.yielded ());
+
+    policy.observe ({Transceiver::DIG_U, Kind::Observed}, 11);
+    QVERIFY (policy.yielded ());
+    policy.discard_split_recovery_readback ();
+    policy.confirm_idle_simplex (Transceiver::DIG_U);
+    QVERIFY (policy.yielded ());
+
+    policy.observe ({Transceiver::CW, Kind::Observed}, 12);
+    policy.confirm_idle_simplex (Transceiver::CW);
+    QVERIFY (policy.yielded ());
+    policy.observe ({Transceiver::DIG_U, Kind::Observed}, 12);
+    policy.confirm_idle_simplex (Transceiver::DIG_U);
+    QVERIFY (policy.ready ());
+    QVERIFY (!policy.preparation_failed ());
+
+    policy.observe ({Transceiver::CW, Kind::Observed}, 13);
+    policy.observe ({Transceiver::DIG_U, Kind::Observed}, 14);
+    policy.confirm_idle_simplex (Transceiver::DIG_U);
+    QVERIFY (policy.yielded ());
+  }
+
   void initialModeDoesNotOverrideStartupPreparation ()
   {
     RadioModePolicy policy;

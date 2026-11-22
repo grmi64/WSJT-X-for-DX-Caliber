@@ -106,6 +106,11 @@ void EmulateSplitTransceiver::handle_frequency_observation (RigFrequency::Eviden
   Q_EMIT frequency_observation (logical);
 }
 
+QString EmulateSplitTransceiver::hardware_split_error ()
+{
+  return tr ("Emulated split mode requires rig to be in simplex mode");
+}
+
 void EmulateSplitTransceiver::handle_update (TransceiverState const& state,
                                              unsigned sequence_number)
 {
@@ -115,10 +120,13 @@ void EmulateSplitTransceiver::handle_update (TransceiverState const& state,
 
   if (state.split ())
     {
-      Q_EMIT failure (tr ("Emulated split mode requires rig to be in simplex mode"));
+      if (!waiting_for_simplex_) Q_EMIT failure (hardware_split_error ());
     }
   else
     {
+      if (state.split_is_off () && state.mode () == DIG_U && state.online ()
+          && state.frequency () && !state.ptt () && !state.tune ())
+        waiting_for_simplex_ = false;
       TransceiverState new_state {state};
       // Fake split QSYs the rig to the TX dial before the PTT echo may
       // arrive. Keep that transient from being adopted as the RX dial.
@@ -131,6 +139,7 @@ void EmulateSplitTransceiver::handle_update (TransceiverState const& state,
 
       // These are always what was requested in prior set state operation
       new_state.tx_frequency (tx_frequency_);
+      new_state.hardware_simplex_confirmed (state.split_is_off ());
       new_state.split (split_);
 
 #if WSJT_TRACE_CAT

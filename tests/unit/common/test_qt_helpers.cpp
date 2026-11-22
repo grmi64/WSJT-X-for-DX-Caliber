@@ -286,13 +286,13 @@ private:
   {
     QTemporaryDir temporary;
     QVERIFY (temporary.isValid ());
-    auto const application_directory = QDir {temporary.path ()}.absoluteFilePath ("WSJT-X.app/Contents/MacOS");
+    auto const application_directory = QDir {temporary.path ()}.absoluteFilePath ("WSJT-X for DXC.app/Contents/MacOS");
 
     auto const result = resolve_installed_data_directory (
       application_directory, "WSJT-X.app/Contents/Resources/wsjtx", "../../..");
 
     QCOMPARE (result.absolutePath (),
-              QDir {temporary.path ()}.absoluteFilePath ("WSJT-X.app/Contents/Resources/wsjtx"));
+              QDir {temporary.path ()}.absoluteFilePath ("WSJT-X for DXC.app/Contents/Resources/wsjtx"));
     QVERIFY (!result.absolutePath ().endsWith ("/wsjtx/wsjtx"));
   }
 

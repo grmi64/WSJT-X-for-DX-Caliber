@@ -105,6 +105,17 @@ QString version (bool include_patch)
   return v;
 }
 
+QString dxc_application_name ()
+{
+  return QStringLiteral ("WSJT-X for DX Caliber");
+}
+
+QString dxc_display_version ()
+{
+  constexpr int dxc_revision = 8;
+  return QStringLiteral ("%1 (DXC revision %2)").arg (version ()).arg (dxc_revision);
+}
+
 QString program_title (QString const& revision)
 {
   QString id {QCoreApplication::applicationName () + "   v" + QCoreApplication::applicationVersion ()};
@@ -115,6 +126,10 @@ QString branded_program_title (QString const& revision)
 {
   // applicationName() itself must stay plain ASCII -- it also names the jt9 shared-memory key and settings/lock/temp paths.
   QString name {QCoreApplication::applicationName ()};
+  auto const dxc_instance = QStringLiteral ("WSJT-X DXC Beta 8 Test");
+  if (name == dxc_instance || name.startsWith (dxc_instance + " - "))
+    return (dxc_application_name () + name.mid (dxc_instance.size ()) + "   "
+            + dxc_display_version () + " " + revision).trimmed ();
   auto const instance_separator = name.indexOf (" - ");
   name.insert (instance_separator < 0 ? name.size () : instance_separator, "™");
   QString id {name + "   v" + QCoreApplication::applicationVersion ()};

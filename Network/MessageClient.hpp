@@ -72,7 +72,7 @@ public:
                              , QString const& dx_grid, bool watchdog_timeout, QString const& sub_mode
                              , bool fast_mode, quint8 special_op_mode, quint32 frequency_tolerance
                              , quint32 tr_period, QString const& configuration_name
-                             , QString const& tx_message);
+                             , QString const& tx_message, bool tx_even = false);
   Q_SLOT void decode (bool is_new, QTime time, qint32 snr, float delta_time, quint32 delta_frequency
                       , QString const& mode, QString const& message, bool low_confidence
                       , bool off_air);
@@ -141,6 +141,12 @@ public:
 
   // this signal is emitted if the server has sent information about a callsign
   Q_SIGNAL void annotation_info (QString const& dx_call, bool sort_order_provided, quint32 sort_order);
+
+  Q_SIGNAL void dxc_set_tx_hz (quint32 request, quint32 hz);
+  Q_SIGNAL void dxc_prepare_call (Frequency dial, QString const& mode, QString const& call, bool tx_even);
+  bool dxc_request_gap (quint32 request, quint8 period);
+  Q_SIGNAL void dxc_gap_reply (quint32 request, quint8 result, quint32 hz);
+  void dxc_reply_tx_hz (quint32 request, quint8 result, quint32 hz);
 
   // this signal is emitted when network errors occur or if a host
   // lookup fails

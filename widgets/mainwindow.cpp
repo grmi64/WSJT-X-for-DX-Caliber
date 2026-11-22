@@ -24,6 +24,11 @@
 #include <QProcessEnvironment>
 #include <QSharedMemory>
 #include <QFileDialog>
+#include <QSaveFile>
+#include <QUuid>
+
+#include "WsSuitePreferences.hpp"
+#include "Transceiver/RigDiagnosticReport.hpp"
 #include <QTextBlock>
 #include <QProgressBar>
 #include <QStyle>
@@ -116,6 +121,7 @@
 #include "Decoder/decodedtext.h"
 #include "Radio.hpp"
 #include "models/Bands.hpp"
+#include "Transceiver/EmulateSplitTransceiver.hpp"
 #include "Transceiver/TransceiverFactory.hpp"
 #include "models/StationList.hpp"
 #include "validators/LiveFrequencyValidator.hpp"
@@ -821,8 +827,6 @@ MainWindow::MainWindow(QDir const& temp_directory,
   // Closedown.
   connect (ui->actionExit, &QAction::triggered, this, &QMainWindow::close);
 
-  // parts of the rig error message box that are fixed
-  m_rigErrorMessageBox.setInformativeText (tr ("Do you want to reconfigure the radio interface?"));
   m_rigErrorMessageBox.setDefaultButton (MessageBox::Ok);
 
   // start audio thread and hook up slots & signals for shutdown management
@@ -1092,6 +1096,34 @@ MainWindow::MainWindow(QDir const& temp_directory,
   connect (m_messageClient, &MessageClient::highlight_callsign, ui->decodedTextBrowser, &DisplayText::highlight_callsign);
   connect (m_messageClient, &MessageClient::switch_configuration, m_multi_settings, &MultiSettings::select_configuration);
   connect (m_messageClient, &MessageClient::configure, this, &MainWindow::remote_configure);
+  connect (m_messageClient, &MessageClient::dxc_prepare_call, this,
+           [this] (Radio::Frequency dial, QString const& mode, QString const& call, bool tx_even) {
+    static QRegularExpression const valid_call {R"(\A(?=[A-Z0-9/]*[0-9])[A-Z0-9/]{3,20}\z)"};
+    if (m_transmitting || m_tune || m_btxok || m_rigState.ptt () || g_iptt != 0
+        || m_auto || ui->autoButton->isChecked () || m_tx_when_ready || ptt1Timer.isActive ()
+        || mode != m_mode || dial != m_operatingFrequency.rx () || m_specOp != SpecOp::NONE
+        || m_modeEntries.active () || !ui->txFirstCheckBox->isEnabled () || ui->txFirstCheckBox->isHidden ()
+        || !ui->dxCallEntry->isVisible () || !ui->genStdMsgsPushButton->isVisible ()
+        || !valid_call.match (call).hasMatch ()) return;
+    {
+      QScopedValueRollback<bool> const block_status {m_block_udp_status_updates, true};
+      ui->txFirstCheckBox->setChecked (tx_even);
+      applyRemoteConfiguration (quint32_max, {}, false, quint32_max, quint32_max, call, {}, true);
+    }
+    statusUpdate ();
+  });
+  connect (m_messageClient, &MessageClient::dxc_set_tx_hz, this, [this] (quint32 request, quint32 hz) {
+      auto * tx = ui->TxFreqSpinBox;
+      quint8 result {0};
+      if (m_transmitting || m_tune || m_btxok || ui->autoButton->isChecked ())
+        result = 1;
+      else if (m_mode != "FT8" || m_specOp != SpecOp::NONE
+               || hz < quint32 (tx->minimum ()) || hz > quint32 (tx->maximum ()))
+        result = 2;
+      else
+        tx->setValue (int (hz));
+      m_messageClient->dxc_reply_tx_hz (request, result, quint32 (tx->value ()));
+    });
   connect (m_messageClient, &MessageClient::annotation_info, this, &MainWindow::annotate_callsign);
 
   // Hook up WSPR band hopping
@@ -1492,6 +1524,13 @@ MainWindow::MainWindow(QDir const& temp_directory,
 #endif
     });
   m_multi_settings->create_menu_actions (this, ui->menuConfig);
+  auto * const import_ws = new QAction {tr ("Import WS Suite or WSJT-X Preferences..."), this};
+  ui->menuFile->insertAction (ui->actionSettings, import_ws);
+  connect (import_ws, &QAction::triggered, this, &MainWindow::importWsSuitePreferences);
+  auto * const save_rig_report = ui->menuTools->addAction (tr ("Save Rig Diagnostic Report"));
+  connect (save_rig_report, &QAction::triggered, this, &MainWindow::saveRigDiagnosticReport);
+  m_saveRigDiagnosticButton = m_rigErrorMessageBox.addButton (
+    tr ("Save Rig Diagnostic Report"), QMessageBox::ActionRole);
   m_configurations_button = m_rigErrorMessageBox.addButton (tr ("Configurations...")
                                                             , QMessageBox::ActionRole);
 
@@ -2152,7 +2191,101 @@ void MainWindow::configureModeControlsLayout()
       spinBox->setSizePolicy (QSizePolicy::Fixed, QSizePolicy::Fixed);
     }
 
-  form->addLayout (makeControlRow (m_txFrequencyLabel, ui->TxFreqSpinBox), 0, 0, Qt::AlignLeft);
+  auto * txRow = makeControlRow (m_txFrequencyLabel, ui->TxFreqSpinBox);
+  auto * findGap = new QPushButton {tr ("Find Clear TX"), formPanel};
+  findGap->setEnabled (false);
+  txRow->addWidget (findGap);
+  form->addLayout (txRow, 0, 0, Qt::AlignLeft);
+  auto * gapStatus = new QLabel {panel};
+  gapStatus->setObjectName (QStringLiteral ("findClearTxStatus"));
+  gapStatus->setWordWrap (true);
+  gapStatus->setMaximumWidth (360);
+  gapStatus->hide ();
+  struct GapRequest {
+    quint32 nonce {};
+    bool even {};
+    Frequency dial {};
+    int previousHz {};
+    qint64 period {};
+  };
+  auto request = std::make_shared<GapRequest> ();
+  auto * timeout = new QTimer {findGap};
+  timeout->setSingleShot (true);
+  auto canApply = [this] (qint64 period) {
+    return m_mode == "FT8" && m_specOp == SpecOp::NONE
+      && (period % 2 == 0) == m_txFirst
+      && !m_transmitting && !m_tune && !m_btxok && !m_rigState.ptt ()
+      && g_iptt == 0 && !m_tx_when_ready && !ptt1Timer.isActive ();
+  };
+  auto finish = [this, findGap, gapStatus, timeout, canApply] (QString const& message) {
+    timeout->stop ();
+    findGap->setText (tr ("Find Clear TX"));
+    findGap->setEnabled (canApply (currentFt8DecodePeriod ()));
+    gapStatus->setText (message);
+    gapStatus->show ();
+    statusBar ()->showMessage (message, 6500);
+  };
+  auto updateAvailability = [this, findGap, request, timeout, canApply, finish] {
+    const auto period = currentFt8DecodePeriod ();
+    if (timeout->isActive () && period != request->period)
+      finish (tr ("The selected FT8 period ended before the gap reply arrived."));
+    const bool available = canApply (period) && !timeout->isActive ();
+    if (findGap->isEnabled () != available) findGap->setEnabled (available);
+    const auto help = m_txFirst
+      ? tr ("Available during the Even FT8 period (:00 and :30 UTC) while idle.")
+      : tr ("Available during the Odd FT8 period (:15 and :45 UTC) while idle.");
+    if (findGap->toolTip () != help) findGap->setToolTip (help);
+  };
+  auto * refresh = new QTimer {findGap};
+  connect (refresh, &QTimer::timeout, findGap, updateAvailability);
+  refresh->start (100);
+  updateAvailability ();
+  connect (timeout, &QTimer::timeout, this, [finish] {
+    finish (tr ("No reply from DXC. Enable Use WSJT-X for DXC in DXC Settings, then open Radio Monitor and click Listen."));
+  });
+  connect (findGap, &QPushButton::clicked, this, [this, request, timeout, findGap, gapStatus, canApply, finish] {
+    const auto period = currentFt8DecodePeriod ();
+    if (!canApply (period))
+      {
+        finish (tr ("Wait for the selected FT8 period while idle and with Tune off."));
+        return;
+      }
+    *request = {QRandomGenerator::global ()->generate (), m_txFirst, m_operatingFrequency.rx (),
+                ui->TxFreqSpinBox->value (), period};
+    if (!m_messageClient->dxc_request_gap (request->nonce, request->even ? 0 : 1))
+      {
+        finish (tr ("Enable Accept UDP requests in Settings → Reporting, and check that Radio Monitor is listening."));
+        return;
+      }
+    findGap->setEnabled (false);
+    findGap->setText (tr ("Checking…"));
+    gapStatus->setText (tr ("Checking Radio Monitor…"));
+    gapStatus->show ();
+    timeout->start (2500);
+  });
+  connect (m_messageClient, &MessageClient::dxc_gap_reply, this,
+           [this, request, timeout, canApply, finish] (quint32 nonce, quint8 result, quint32 hz) {
+    if (!timeout->isActive () || nonce != request->nonce) return;
+    auto * tx = ui->TxFreqSpinBox;
+    const auto period = currentFt8DecodePeriod ();
+    if (period != request->period || !canApply (period) || m_txFirst != request->even
+        || m_operatingFrequency.rx () != request->dial
+        || tx->value () != request->previousHz)
+      {
+        finish (tr ("TX state, period, or frequency changed. Press Find Clear TX again."));
+        return;
+      }
+    if (result == 1) finish (tr ("DXC is waiting for usable audio in the selected FT8 period. Try again when it starts."));
+    else if (result == 2)
+      finish (tr ("No clear TX offset found for the selected period."));
+    else if (result != 0 || hz < quint32 (tx->minimum ()) || hz > quint32 (tx->maximum ()))
+      finish (tr ("Radio Monitor returned an invalid TX offset."));
+    else
+      {
+        tx->setValue (int (hz));
+        finish (tr ("Tx Hz set to %1 · %2").arg (tx->value ()).arg (request->even ? tr ("Even") : tr ("Odd")));
+      }
+  });
   form->addLayout (makeControlRow (m_submodeLabel, ui->sbSubmode), 0, 1, Qt::AlignLeft);
   form->addLayout (m_frequencyToleranceRow, 1, 0, Qt::AlignLeft);
   form->addLayout (makeControlRow (m_frequencyToleranceLabel, ui->sbFtol), 1, 1, Qt::AlignLeft);
@@ -2167,6 +2300,7 @@ void MainWindow::configureModeControlsLayout()
   panelLayout->addLayout (checkboxRow);
   panelLayout->addWidget (formPanel, 0, Qt::AlignLeft);
   panelLayout->addLayout (ui->submode_gridLayout);
+  panelLayout->addWidget (gapStatus);
   panelLayout->addStretch (1);
   ui->gridLayout_3->addWidget (panel, 0, 0, 1, 2);
   delete ui->verticalLayout_14;
@@ -4507,6 +4641,13 @@ void MainWindow::handleRadioModeControl (bool yielded, bool ready)
     }
   if (ready) startPendingRigTune ();
   updateRadioModeStatus ();
+  if (ready && m_waitingForHardwareSimplex && !m_config.hardware_split_recovery_pending ())
+    {
+      m_waitingForHardwareSimplex = false;
+      rigFailed = false;
+      RigDiagnosticReport::record (QStringLiteral ("WSJT-X confirmed Split off and DATA; warning cleared"));
+      m_rigErrorMessageBox.done (rig_warning_recovered);
+    }
 }
 
 void MainWindow::cancelRigTune ()
@@ -12471,6 +12612,12 @@ void MainWindow::handle_transceiver_closing (bool failed)
 
 void MainWindow::handle_transceiver_failure (QString const& reason)
 {
+  if (reason == EmulateSplitTransceiver::hardware_split_error ())
+    {
+      cancelRigTune ();
+      m_tx_when_ready = false;
+      ptt1Timer.stop ();
+    }
   if (m_operatingFrequency.recoveryRequired ()) m_first_error = false;
   noteTxStopReason (TxEvidence::TxStopReason::Error);
   if (m_jttyTxLifecycle.active () || !m_jttyTransmitQueue.empty ()) {
@@ -12498,8 +12645,8 @@ void MainWindow::handle_transceiver_failure (QString const& reason)
   endQsoRepeat (QsoRepeatEnd::Fault);
   m_auto = false;
   reset_transmit_controls_after_stop ();
-  rigFailure (reason);
   rigFailed = true;
+  rigFailure (reason);
 #ifdef WIN32
   finalizeMmttyExternalAbort ();
 #endif
@@ -12507,7 +12654,12 @@ void MainWindow::handle_transceiver_failure (QString const& reason)
 
 void MainWindow::rigFailure (QString const& reason)
 {
-  if (m_first_error)
+  bool const hardware_split = reason == EmulateSplitTransceiver::hardware_split_error ();
+  RigDiagnosticReport::record (hardware_split ? QStringLiteral ("Split warning reported")
+                                               : QStringLiteral ("Rig warning reported"));
+  bool const auto_recover = hardware_split && m_config.hardware_split_recovery_pending ();
+  bool const updating_dialog = m_rigErrorMessageBox.isVisible ();
+  if (m_first_error && !auto_recover && !updating_dialog)
     {
       // one automatic retry
       QTimer::singleShot (0, this, SLOT (rigOpen ()));
@@ -12516,6 +12668,14 @@ void MainWindow::rigFailure (QString const& reason)
   else
     {
       if (m_splash && m_splash->isVisible ()) m_splash->hide ();
+      m_rigErrorMessageBox.setInformativeText (
+        auto_recover
+        ? tr ("The radio reported Split on. This warning clears when WSJT-X confirms Split is off "
+              "and VFO A is in DATA. If needed, make those changes at the radio. Enable Tx stays off.")
+        : hardware_split
+          ? tr ("Split is on at the radio. Turn Split off on the radio to return to simplex, then click Retry. "
+                "Leave Fake It (emulated split) selected in WSJT-X.")
+          : tr ("Do you want to reconfigure the radio interface?"));
       m_rigErrorMessageBox.setDetailedText (reason + "\n\nTimestamp: "
 #if QT_VERSION >= QT_VERSION_CHECK (5, 8, 0)
                                             + QDateTime::currentDateTimeUtc ().toString (Qt::ISODateWithMs)
@@ -12524,8 +12684,33 @@ void MainWindow::rigFailure (QString const& reason)
 #endif
                                             );
 
+      m_waitingForHardwareSimplex = auto_recover;
+      m_rigErrorMessageBox.button (MessageBox::Retry)->setEnabled (!auto_recover);
+      if (auto_recover)
+        {
+          QTimer::singleShot (0, this, [this] {
+            if (m_waitingForHardwareSimplex && !m_closing)
+              m_config.reconnect_after_hardware_split ();
+          });
+        }
+      if (updating_dialog) return;
+
       // don't call slot functions directly to avoid recursion
-      m_rigErrorMessageBox.exec ();
+      int result;
+      do
+        {
+          result = m_rigErrorMessageBox.exec ();
+          if (result == rig_warning_recovered
+              || m_rigErrorMessageBox.clickedButton () != m_saveRigDiagnosticButton) break;
+          saveRigDiagnosticReport ();
+        }
+      while (true);
+      m_waitingForHardwareSimplex = false;
+      if (result == rig_warning_recovered)
+        {
+          m_first_error = true;
+          return;
+        }
       auto const clicked_button = m_rigErrorMessageBox.clickedButton ();
       if (clicked_button == m_configurations_button)
         {
@@ -12554,6 +12739,63 @@ void MainWindow::rigFailure (QString const& reason)
         }
       m_first_error = true;     // reset
     }
+}
+
+void MainWindow::saveRigDiagnosticReport ()
+{
+  auto const utc = QDateTime::currentDateTimeUtc ();
+  auto const id = QUuid::createUuid ().toString (QUuid::WithoutBraces).left (8);
+  auto const path = m_config.writeable_data_dir ().absoluteFilePath (
+    QStringLiteral ("rig-report-%1-%2.txt").arg (utc.toString ("yyyyMMdd-HHmmss"), id));
+  QSaveFile file {path};
+  auto const report = (dxc_display_version () + QStringLiteral ("\nUTC: ") + utc.toString (Qt::ISODateWithMs)
+    + QStringLiteral ("\nRecent rig events (last 60 seconds, up to 512 entries)\n")
+    + QStringLiteral ("CAT traffic is available for the Commander connection.\n\n")
+    + RigDiagnosticReport::snapshot () + QLatin1Char ('\n')).toUtf8 ();
+  bool const saved = file.open (QIODevice::WriteOnly)
+    && file.write (report) == report.size () && file.commit ();
+  auto const outcome = saved ? tr ("Diagnostic report saved to %1").arg (path)
+                             : tr ("Could not save the rig diagnostic report: %1").arg (file.errorString ());
+  if (sender () != m_saveRigDiagnosticButton && !m_rigErrorMessageBox.isVisible ())
+    showStatusMessage (outcome);
+  m_rigErrorMessageBox.setDetailedText (m_rigErrorMessageBox.detailedText ()
+                                      + QStringLiteral ("\n\n") + outcome);
+}
+
+void MainWindow::importWsSuitePreferences ()
+{
+  auto const path = QFileDialog::getOpenFileName (
+    this, tr ("Choose a WS Suite or WSJT-X preferences file"), QDir::homePath (), tr ("Preferences (*.ini)"));
+  if (path.isEmpty ()) return;
+  QFileInfo const input {path};
+  if (!input.isReadable () || input.size () > 4 * 1024 * 1024)
+    {
+      MessageBox::warning_message (this, tr ("Import Preferences"),
+                                   tr ("Choose a readable WS Suite or WSJT-X .ini file under 4 MB."));
+      return;
+    }
+  QSettings source {path, QSettings::IniFormat};
+  bool palette_skipped {};
+  auto const values = WsSuitePreferences::read (source, *m_settings, palette_skipped);
+  if (values.isEmpty () || source.status () != QSettings::NoError)
+    {
+      MessageBox::warning_message (this, tr ("Import Preferences"),
+                                   tr ("No supported preferences were found."));
+      return;
+    }
+  auto confirmation = tr ("Import %1 supported color, filter and logging settings into this profile? "
+                           "They take effect the next time you open WSJT-X. "
+                           "Radio, audio and network settings and QSO records are kept.").arg (values.size ());
+  if (palette_skipped) confirmation += tr (" The source color palette could not be read.");
+  if (MessageBox::Yes != MessageBox::query_message (this, tr ("Import Preferences"), confirmation))
+    return;
+  m_settings->setValue (WsSuitePreferences::pending_key, values);
+  m_settings->sync ();
+  if (m_settings->status () == QSettings::NoError)
+    showStatusMessage (tr ("Imported preferences will apply at the next launch."));
+  else
+    MessageBox::warning_message (this, tr ("Import Preferences"),
+                                 tr ("Could not save the pending import."));
 }
 
 void MainWindow::dispatchTxRequest (TxEvidence::TxRequest const& request)
@@ -14083,7 +14325,7 @@ void MainWindow::statusUpdate () const
                                   submode != QChar::Null ? QString {submode} : QString {}, m_bFastMode,
                                   static_cast<quint8> (m_specOp),
                                   ftol, tr_period, m_multi_settings->configuration_name (),
-                                  m_currentMessage);
+                                  m_currentMessage, m_txFirst);
 }
 
 void MainWindow::childEvent (QChildEvent * e)

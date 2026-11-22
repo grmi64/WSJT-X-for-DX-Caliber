@@ -167,7 +167,8 @@ public:
   // PTT port and to some extent ptt_type are independent of interface
   // type
   //
-  std::unique_ptr<Transceiver> create (ParameterPack const&, QThread * target_thread = nullptr);
+  std::unique_ptr<Transceiver> create (ParameterPack const&, QThread * target_thread = nullptr,
+                                      bool wait_for_hardware_simplex = false);
   
   //w3sz using logger_type = boost::log::sources::severity_channel_logger_mt<boost::log::trivial::severity_level>;
   

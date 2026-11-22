@@ -131,6 +131,8 @@ public:
     RigFrequency::Request const& frequency_request (RigFrequency::Path path) const
     { return frequency_requests_[path == RigFrequency::Path::Tx]; }
     bool split () const {return Split::on == split_;}
+    bool split_is_off () const {return Split::off == split_;}
+    bool hardware_simplex_confirmed () const {return hardware_simplex_confirmed_;}
     MODE mode () const {return mode_;}
     bool ptt () const {return ptt_;}
     bool audio () const {return audio_;}
@@ -170,6 +172,7 @@ public:
     void frequency_request (RigFrequency::Path slot, RigFrequency::Request const& request)
     { frequency_requests_[slot == RigFrequency::Path::Tx] = request; }
     void split (bool state) {split_ = state ? Split::on : Split::off;}
+    void hardware_simplex_confirmed (bool confirmed) {hardware_simplex_confirmed_ = confirmed;}
     void mode (MODE m) {mode_ = m;}
     void ptt (bool state) {ptt_ = state;}
     void audio (bool state) {audio_ = state;}
@@ -208,6 +211,7 @@ public:
     RigFrequency::Request frequency_requests_[2];
     MODE mode_;
     enum class Split {unknown, off, on} split_;
+    bool hardware_simplex_confirmed_ = false;
     bool ptt_;
     bool audio_;
     bool tx_audio_;

@@ -260,7 +260,7 @@ contains
                      elseif(iseg.eq.2) then
                         smax1=smax
                         ibmin=560
-                        ibmax=1012
+                        ibmax=1268 ! Search late arrivals through DT +1.40 seconds
                      elseif(iseg.eq.3) then
                         ibmin=-344
                         ibmax=108

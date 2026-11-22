@@ -940,6 +940,151 @@ private slots:
     QVERIFY (s.server.wait_for ([&] { return !s.activity.rigPtt; }, 3000));
   }
 
+  void wsSuiteImportCopiesSupportedSettingsAndAppliesOnce ()
+  {
+    QSettings source {directory_.filePath ("ws-import.ini"), QSettings::IniFormat};
+    source.clear ();
+    source.setValue ("Configuration/Rig", "Imported rig");
+    source.setValue ("Configuration/CATNetworkPort", "unwanted");
+    source.setValue ("Configuration/PromptToLog", true);
+    source.setValue ("Configuration/HighlightAll", true);
+    source.setValue ("Configuration/Territory1", "Japan");
+    source.setValue ("Common/HideTerritory1", true);
+
+    QByteArray encoded;
+    QDataStream stream {&encoded, QIODevice::WriteOnly};
+    stream << quint32 {2};
+    stream << "MyCall" << quint8 {1}
+           << QBrush {QColor {"#112233"}} << QBrush {QColor {"#cceeff"}};
+    stream << "USState" << quint8 {1}
+           << QBrush {} << QBrush {QColor {"#123456"}};
+    auto const palette = QString::fromLatin1 (encoded.toBase64 ());
+    source.setValue ("Configuration/DecodeHighlighting_v2", palette);
+    settings_->setValue ("Configuration/Rig", "Existing rig");
+    settings_->setValue ("Configuration/AutoLog", true);
+
+    bool skipped {};
+    auto const values = WsSuitePreferences::read (source, *settings_, skipped);
+    QVERIFY (!skipped);
+    QVERIFY (!values.contains ("Configuration/Rig"));
+    QVERIFY (!values.contains ("Configuration/CATNetworkPort"));
+    settings_->setValue (WsSuitePreferences::pending_key, values);
+    WsSuitePreferences::apply_pending (*settings_);
+    QCOMPARE (settings_->value ("Configuration/Rig").toString (), QString {"Existing rig"});
+    QVERIFY (settings_->value ("Configuration/PromptToLog").toBool ());
+    QVERIFY (!settings_->value ("Configuration/AutoLog").toBool ());
+    QVERIFY (settings_->value ("Configuration/HighlightAllMessages").toBool ());
+    QVERIFY (settings_->value ("Common/HideTerritory1").toBool ());
+    QCOMPARE (settings_->value ("Configuration/Territory1").toString (), QString {"Japan"});
+    auto const colors = settings_->value ("Configuration/DecodeHighlighting")
+      .value<DecodeHighlightingModel::HighlightItems> ();
+    auto const color = std::find_if (colors.cbegin (), colors.cend (), [] (auto const& item) {
+      return item.type_ == DecodeHighlightingModel::Highlight::MyCall;
+    });
+    QVERIFY (color != colors.cend ());
+    QCOMPARE (color->foreground_.color (), QColor {"#112233"});
+    QCOMPARE (color->background_.color (), QColor {"#cceeff"});
+    QVERIFY (!settings_->contains (WsSuitePreferences::pending_key));
+    settings_->setValue ("Configuration/HighlightAllMessages", false);
+    WsSuitePreferences::apply_pending (*settings_);
+    QVERIFY (!settings_->value ("Configuration/HighlightAllMessages").toBool ());
+
+    source.setValue ("Configuration/DecodeHighlighting_v2", palette.left (20));
+    auto const malformed = WsSuitePreferences::read (source, *settings_, skipped);
+    QVERIFY (skipped);
+    QVERIFY (!malformed.contains ("Configuration/DecodeHighlighting"));
+    QVERIFY (malformed.contains ("Configuration/PromptToLog"));
+  }
+
+  void stockWsjtxImportAcceptsNativePaletteAndPreservesConnectionSettings ()
+  {
+    auto const source_path = directory_.filePath ("WSJT-X.ini");
+    auto palette = DecodeHighlightingModel::default_items ();
+    palette.front ().background_ = QBrush {QColor {"#127578"}};
+    {
+      QSettings source {source_path, QSettings::IniFormat};
+      source.clear ();
+      source.setValue ("Configuration/DecodeHighlighting", QVariant::fromValue (palette));
+      source.setValue ("Common/HideB4", true);
+      source.setValue ("Configuration/AutoLog", true);
+      source.setValue ("Configuration/Rig", "Stock rig");
+      source.setValue ("Configuration/UDPServer", "192.0.2.1");
+      source.setValue ("Configuration/AdifLogFile", "/stock/wsjtx_log.adi");
+      source.sync ();
+      QCOMPARE (source.status (), QSettings::NoError);
+    }
+    QSettings source {source_path, QSettings::IniFormat};
+    settings_->setValue ("Configuration/Rig", "DXC rig");
+    settings_->setValue ("Configuration/UDPServer", "127.0.0.1");
+    settings_->setValue ("Configuration/AdifLogFile", "/dxc/wsjtx_log.adi");
+    settings_->setValue ("Configuration/PromptToLog", true);
+
+    bool skipped {};
+    auto const values = WsSuitePreferences::read (source, *settings_, skipped);
+    QVERIFY (!skipped);
+    settings_->setValue (WsSuitePreferences::pending_key, values);
+    WsSuitePreferences::apply_pending (*settings_);
+
+    auto const colors = settings_->value ("Configuration/DecodeHighlighting")
+      .value<DecodeHighlightingModel::HighlightItems> ();
+    QVERIFY (colors == palette);
+    QVERIFY (settings_->value ("Common/HideB4").toBool ());
+    QVERIFY (settings_->value ("Configuration/AutoLog").toBool ());
+    QVERIFY (!settings_->value ("Configuration/PromptToLog").toBool ());
+    QCOMPARE (settings_->value ("Configuration/Rig").toString (), QString {"DXC rig"});
+    QCOMPARE (settings_->value ("Configuration/UDPServer").toString (), QString {"127.0.0.1"});
+    QCOMPARE (settings_->value ("Configuration/AdifLogFile").toString (), QString {"/dxc/wsjtx_log.adi"});
+    QVERIFY (!settings_->contains (WsSuitePreferences::pending_key));
+  }
+
+  void rigDiagnosticKeepsRecentEventsInOrder ()
+  {
+    for (int i = 0; i <= 512; ++i)
+      RigDiagnosticReport::record (QStringLiteral ("test-event-%1-end").arg (i));
+    auto const events = RigDiagnosticReport::snapshot ().split (QLatin1Char ('\n'));
+    QCOMPARE (events.size (), 512);
+    QVERIFY (events.front ().endsWith ("test-event-1-end"));
+    QVERIFY (events.back ().endsWith ("test-event-512-end"));
+  }
+
+  void hardwareSplitRecoveryDoesNotRequestTransmitOrModeChanges ()
+  {
+    auto& rig = dialog ();
+    rig.hide ();
+    rig.data_mode_ = Configuration::data_mode_data;
+    rig.rig_is_dummy_ = false;
+    rig.rig_params_.split_mode = TransceiverFactory::split_mode_emulate;
+    rig.handle_transceiver_failure (EmulateSplitTransceiver::hardware_split_error ());
+    QVERIFY (configuration_->radio_mode_yielded ());
+    QVERIFY (configuration_->hardware_split_recovery_pending ());
+
+    QScopedValueRollback<bool> const active {rig.rig_active_, true};
+    auto const sequence = ++rig.transceiver_command_number_;
+    QSignalSpy commands {&rig, &Configuration::impl::set_transceiver};
+    QVERIFY (!configuration_->prepare_radio_mode ());
+    configuration_->transceiver_mode (Transceiver::DIG_U);
+    configuration_->transceiver_ptt (true);
+    configuration_->transceiver_tune (true);
+    Transceiver::TransceiverState state;
+    state.online (true);
+    state.frequency (18100000);
+    state.mode (Transceiver::DIG_U);
+    rig.handle_transceiver_update (state, sequence);
+    QVERIFY (configuration_->radio_mode_yielded ());
+    rig.handle_mode_status ({Transceiver::DIG_U, Transceiver::ModeStatusKind::Observed}, sequence);
+    rig.handle_transceiver_update (state, sequence);
+    QVERIFY (configuration_->radio_mode_yielded ());
+    state.hardware_simplex_confirmed (true);
+    state.ptt (true);
+    rig.handle_transceiver_update (state, sequence);
+    QVERIFY (configuration_->radio_mode_yielded ());
+    state.ptt (false);
+    rig.handle_transceiver_update (state, sequence);
+    QVERIFY (configuration_->radio_mode_ready ());
+    QVERIFY (!configuration_->hardware_split_recovery_pending ());
+    QCOMPARE (commands.size (), 0);
+  }
+
   void firstPreparationOnCompatibleRadioStillDetectsLaterOverride ()
   {
     dialog ().data_mode_ = Configuration::data_mode_data;

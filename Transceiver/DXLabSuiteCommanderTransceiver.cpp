@@ -1,4 +1,7 @@
 #include "DXLabSuiteCommanderTransceiver.hpp"
+#include "RigDiagnosticReport.hpp"
+
+#include <QRegularExpression>
 
 #include <QTcpSocket>
 #include <QRegularExpression>
@@ -449,6 +452,10 @@ QString DXLabSuiteCommanderTransceiver::command_with_reply (QString const& cmd)
   if (result != NULL)
   {
   CAT_TRACE (cmd << " -> " << QString {result});
+  static QRegularExpression const readback {QStringLiteral (
+    "^<Cmd(?:Freq|TXFreq|Split|Mode|Tx):[0-9]{1,3}>[A-Za-z0-9 +.,-]{1,32}$")};
+  if (readback.match (result).hasMatch ())
+    RigDiagnosticReport::record (QStringLiteral ("CAT ← ") + result);
   return result;                // converting raw UTF-8 bytes to QString
   }
   return "";
@@ -456,6 +463,7 @@ QString DXLabSuiteCommanderTransceiver::command_with_reply (QString const& cmd)
 
 bool DXLabSuiteCommanderTransceiver::write_to_port (QString const& s)
 {
+  RigDiagnosticReport::record (QStringLiteral ("WSJT-X CAT → ") + s);
   auto data = s.toLocal8Bit ();
   auto to_send = data.constData ();
   auto length = data.size ();
@@ -466,6 +474,7 @@ bool DXLabSuiteCommanderTransceiver::write_to_port (QString const& s)
       auto bytes_sent = commander_->write (to_send + total_bytes_sent, length - total_bytes_sent);
       if (bytes_sent < 0 || !commander_->waitForBytesWritten ())
         {
+          RigDiagnosticReport::record (QStringLiteral ("CAT command write failed"));
           return false;
         }
 

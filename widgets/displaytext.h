@@ -54,6 +54,16 @@ public:
   Q_SLOT void highlight_callsign (QString const& callsign, QColor const& bg, QColor const& fg, bool last_period_only);
 
 private:
+  struct CountryHighlight
+  {
+    int start = 0;
+    int length = 0;
+    QColor background;
+    QColor foreground;
+  };
+  void insertFormattedText (QString const& text, QColor bg, QColor fg,
+                            QString const& call1, QString const& call2,
+                            QTextCursor::MoveOperation location, CountryHighlight const& country);
   void AudioAlerts();
   QTimer alertsTimer;
   QString leftJustifyAppendage (QString message, QString const& appendage) const;

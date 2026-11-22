@@ -305,6 +305,7 @@ public:
   bool highlight_only_fields () const;
   bool include_WAE_entities () const;
   bool highlight_73 () const;
+  bool highlight_all_messages () const;
   bool highlight_orange () const;
   bool highlight_blue () const;
   bool bSpecialOp () const;
@@ -436,6 +437,8 @@ public:
   // Request configured mode at the observed dial; readiness is asynchronous.
   bool prepare_radio_mode ();
   bool radio_mode_ready () const;
+  bool hardware_split_recovery_pending () const;
+  void reconnect_after_hardware_split ();
   bool radio_mode_yielded () const;
   Q_SIGNAL void radio_mode_control_changed (bool yielded, bool ready) const;
 

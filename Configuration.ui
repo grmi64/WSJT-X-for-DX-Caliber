@@ -282,6 +282,16 @@
             </property>
            </widget>
           </item>
+          <item row="5" column="2">
+           <widget class="QCheckBox" name="highlight_all_messages_check_box">
+            <property name="toolTip">
+             <string>Use the decode highlighting colors on the country name in other messages. Enable Show DXCC for all messages in General to display those names.</string>
+            </property>
+            <property name="text">
+             <string>Highlight all messages (country only)</string>
+            </property>
+           </widget>
+          </item>
           <item row="2" column="0">
            <widget class="QCheckBox" name="miles_check_box">
             <property name="toolTip">

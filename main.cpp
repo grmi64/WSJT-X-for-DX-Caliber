@@ -82,6 +82,9 @@
 #include "Radio.hpp"
 #include "models/FrequencyList.hpp"
 #include "widgets/SplashScreen.hpp"
+#ifdef WSJT_ENABLE_FILE_IMPORT_TEST
+#include "tests/integration/preferences/FileImportSmokeTest.hpp"
+#endif
 #include "widgets/MessageBox.hpp"       // last to avoid nasty MS macro definitions
 
 extern "C" {
@@ -333,7 +336,8 @@ int main(int argc, char *argv[])
       std::locale::global (std::locale::classic ());
 
       // Override programs executable basename as application name.
-      a.setApplicationName ("WSJT-X");
+      a.setApplicationName ("WSJT-X DXC Beta 8 Test");
+      a.setApplicationDisplayName (dxc_application_name ());
       a.setApplicationVersion (version ());
 
       QCommandLineParser parser;
@@ -720,6 +724,24 @@ int main(int argc, char *argv[])
           if (!qso_test_directory->isValid ())
             throw std::runtime_error {"Cannot create a temporary QSO test directory"};
           settings_file = qso_test_directory->filePath ("settings.ini");
+        }
+#endif
+#ifdef WSJT_ENABLE_FILE_IMPORT_TEST
+      auto const import_test_root = startup_smoke_test ? env.value ("WSJTX_FILE_IMPORT_TEST_ROOT") : QString {};
+      bool const import_test_ws_suite = env.value ("WSJTX_FILE_IMPORT_TEST_CASE") == "ws-suite";
+      bool const import_test_verify = env.value ("WSJTX_FILE_IMPORT_TEST_PHASE") == "verify";
+      if (!import_test_root.isEmpty ())
+        {
+          QApplication::setAttribute (Qt::AA_DontUseNativeDialogs);
+          settings_file = QDir {import_test_root}.absoluteFilePath ("destination.ini");
+          if (!import_test_verify)
+            {
+              QSettings isolated {settings_file, QSettings::IniFormat};
+              isolated.setValue ("Configuration/Rig", "None");
+              isolated.setValue ("Configuration/UDPServer", "127.0.0.1");
+              isolated.setValue ("Configuration/PromptToLog", false);
+              isolated.setValue ("Configuration/AutoLog", false);
+            }
         }
 #endif
       MultiSettings multi_settings {parser.value (cfg_option), settings_file};
@@ -1257,55 +1279,73 @@ int main(int argc, char *argv[])
 #endif
           if (startup_smoke_test)
             {
-              QString expectedMmttyMode;
-              if (parser.isSet (n1mm_tcp_port_option))
+#ifdef WSJT_ENABLE_FILE_IMPORT_TEST
+              if (!import_test_root.isEmpty ())
                 {
-                  expectedMmttyMode = parser.isSet (mode_option)
-                    ? parser.value (mode_option).toUpper () : QStringLiteral ("JTTY");
-                  if (!parser.isSet (mode_option)) w.set_mode_from_command_line ("FT8");
+                  QTimer::singleShot (0, &w, [&] {
+                    auto const error = FileImportSmokeTest::run (w, *multi_settings.settings (),
+                      import_test_root, import_test_ws_suite, import_test_verify);
+                    if (!error.isEmpty ()) std::cerr << error.toStdString () << std::endl;
+                    startup_smoke_ready = w.close () && error.isEmpty ();
+                    if (startup_smoke_ready)
+                      std::cerr << "File import smoke: " << (import_test_verify ? "verify" : "stage")
+                                << " passed" << std::endl;
+                    a.exit (startup_smoke_ready ? EXIT_SUCCESS : EXIT_FAILURE);
+                  });
                 }
-              QTimer::singleShot (1000, &w, [&a, &w, &smoke_phase, &startup_smoke_ready, expectedMmttyMode] {
-                smoke_phase ("event loop reached");
-                if (auto *modal = QApplication::activeModalWidget ())
+              else
+#endif
+              {
+                QString expectedMmttyMode;
+                if (parser.isSet (n1mm_tcp_port_option))
                   {
-                    report_unexpected_modal (*modal);
-                    modal->close ();
-                    w.close ();
-                    a.exit (EXIT_FAILURE);
-                    return;
+                    expectedMmttyMode = parser.isSet (mode_option)
+                      ? parser.value (mode_option).toUpper () : QStringLiteral ("JTTY");
+                    if (!parser.isSet (mode_option)) w.set_mode_from_command_line ("FT8");
                   }
-                if (!expectedMmttyMode.isEmpty ())
-                  {
-                    auto * action = w.findChild<QAction *> ("action" + expectedMmttyMode);
-                    if (!QMetaObject::invokeMethod (&w, "switchToJttyAfterMmttyStartup", Qt::DirectConnection))
-                      {
-                        std::cerr << "WSJT-X startup smoke: MMTTY startup callback was not found" << std::endl;
-                        w.close ();
-                        a.exit (EXIT_FAILURE);
-                        return;
-                      }
-                    if (!action || !action->isChecked ())
-                      {
-                        std::cerr << "WSJT-X startup smoke: MMTTY startup did not preserve/select "
-                                  << expectedMmttyMode.toStdString () << std::endl;
-                        w.close ();
-                        a.exit (EXIT_FAILURE);
-                        return;
-                      }
-                    smoke_phase ("MMTTY startup mode verified");
-                  }
-                if (w.close ())
-                  {
-                    smoke_phase ("close accepted");
-                    startup_smoke_ready = true;
-                    a.quit ();
-                  }
-                else
-                  {
-                    std::cerr << "WSJT-X startup smoke: main window rejected close" << std::endl;
-                    a.exit (EXIT_FAILURE);
-                  }
-              });
+                QTimer::singleShot (1000, &w, [&a, &w, &smoke_phase, &startup_smoke_ready, expectedMmttyMode] {
+                  smoke_phase ("event loop reached");
+                  if (auto *modal = QApplication::activeModalWidget ())
+                    {
+                      report_unexpected_modal (*modal);
+                      modal->close ();
+                      w.close ();
+                      a.exit (EXIT_FAILURE);
+                      return;
+                    }
+                  if (!expectedMmttyMode.isEmpty ())
+                    {
+                      auto * action = w.findChild<QAction *> ("action" + expectedMmttyMode);
+                      if (!QMetaObject::invokeMethod (&w, "switchToJttyAfterMmttyStartup", Qt::DirectConnection))
+                        {
+                          std::cerr << "WSJT-X startup smoke: MMTTY startup callback was not found" << std::endl;
+                          w.close ();
+                          a.exit (EXIT_FAILURE);
+                          return;
+                        }
+                      if (!action || !action->isChecked ())
+                        {
+                          std::cerr << "WSJT-X startup smoke: MMTTY startup did not preserve/select "
+                                    << expectedMmttyMode.toStdString () << std::endl;
+                          w.close ();
+                          a.exit (EXIT_FAILURE);
+                          return;
+                        }
+                      smoke_phase ("MMTTY startup mode verified");
+                    }
+                  if (w.close ())
+                    {
+                      smoke_phase ("close accepted");
+                      startup_smoke_ready = true;
+                      a.quit ();
+                    }
+                  else
+                    {
+                      std::cerr << "WSJT-X startup smoke: main window rejected close" << std::endl;
+                      a.exit (EXIT_FAILURE);
+                    }
+                });
+              }
             }
           splash.raise ();
           QObject::connect (&a, SIGNAL (lastWindowClosed()), &a, SLOT (quit()));

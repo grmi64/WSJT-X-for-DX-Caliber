@@ -151,7 +151,7 @@ set (wsjtx_PACKAGE_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${
 #
 # project information
 #
-set (PROJECT_BUNDLE_NAME "WSJT-X")
+set (PROJECT_BUNDLE_NAME "WSJT-X for DX Caliber")
 set (PROJECT_VENDOR "WSJT Development Group")
 set (PROJECT_CONTACT "jtaylor@princeton.edu")
 set (PROJECT_COPYRIGHT "Copyright (C) 2001-2026 by Joe Taylor, K1JT")
@@ -1272,7 +1272,7 @@ set_target_properties (wsjtx PROPERTIES
   MACOSX_BUNDLE_BUNDLE_NAME "${PROJECT_BUNDLE_NAME}"
   MACOSX_BUNDLE_BUNDLE_EXECUTABLE_NAME "${PROJECT_NAME}"
   MACOSX_BUNDLE_COPYRIGHT "${PROJECT_COPYRIGHT}"
-  MACOSX_BUNDLE_GUI_IDENTIFIER "org.k1jt.wsjtx"
+  MACOSX_BUNDLE_GUI_IDENTIFIER "local.dxcaliber.wsjtx-beta8-test"
   )
 
 target_include_directories (wsjtx PRIVATE ${FFTW3_INCLUDE_DIRS})
@@ -1298,6 +1298,16 @@ if (APPLE AND WSJT_ENABLE_TESTS)
 endif ()
 
 if (WSJT_ENABLE_TESTS AND NOT WIN32)
+  target_compile_definitions (wsjtx PRIVATE WSJT_ENABLE_FILE_IMPORT_TEST=1)
+  foreach (profile IN ITEMS ws-suite stock-wsjtx)
+    add_test (NAME test_file_import_${profile}
+      COMMAND ${CMAKE_COMMAND}
+        -DAPPLICATION=$<TARGET_FILE:wsjtx>
+        -DCASE=${profile}
+        -DWORK_DIR=${CMAKE_BINARY_DIR}/Testing/FileImport/${profile}
+        -P ${CMAKE_SOURCE_DIR}/tests/integration/preferences/test_file_import.cmake)
+    set_tests_properties (test_file_import_${profile} PROPERTIES TIMEOUT 55)
+  endforeach ()
   foreach (startup_scenario IN ITEMS default mmtty_port_only mmtty_ft8 mmtty_ft4 mmtty_jtty)
     set (startup_test test_wsjtx_startup)
     set (startup_arguments)

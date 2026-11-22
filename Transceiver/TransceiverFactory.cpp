@@ -86,7 +86,8 @@ bool TransceiverFactory::has_asynchronous_CAT (QString const& name) const
   return supported_transceivers ()[name].asynchronous_;
 }
 
-std::unique_ptr<Transceiver> TransceiverFactory::create (ParameterPack const& params, QThread * target_thread)
+std::unique_ptr<Transceiver> TransceiverFactory::create (ParameterPack const& params, QThread * target_thread,
+                                                          bool wait_for_hardware_simplex)
 {
   std::unique_ptr<Transceiver> result;
   switch (supported_transceivers ()[params.rig_name].model_number_)
@@ -219,7 +220,9 @@ std::unique_ptr<Transceiver> TransceiverFactory::create (ParameterPack const& pa
   if (split_mode_emulate == params.split_mode)
     {
       // wrap the Transceiver object instance with a decorator that emulates split mode
-      result.reset (new EmulateSplitTransceiver {&logger_, std::move (result)});
+      auto emulated = std::make_unique<EmulateSplitTransceiver> (&logger_, std::move (result));
+      if (wait_for_hardware_simplex) emulated->wait_for_hardware_simplex ();
+      result = std::move (emulated);
       if (target_thread)
         {
           result->moveToThread (target_thread);

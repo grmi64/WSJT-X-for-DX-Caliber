@@ -1187,6 +1187,7 @@ public:
     : construction_trace_ {"logbook.construct"}
     , configuration_ {configuration}
     , path_ {configuration->adif_log_file_path ()}
+    , dxc_history_path_ {qEnvironmentVariable ("DXC_WSJTX_HISTORY_FILE")}
     , prefixes_ {configuration}
   {
     construction_trace_.finish ();
@@ -1202,6 +1203,13 @@ public:
 #endif
   }
 
+  QStringList history_files () const
+  {
+    auto files = configuration_->supplemental_history_files ();
+    if (!dxc_history_path_.isEmpty ()) files.append (dxc_history_path_);
+    return WorkedBefore::normalize_history_files (files, path_);
+  }
+
   QStringList watched_paths () const
   {
     // A history file that is the same file as the log (a link, another spelling) must
@@ -1212,7 +1220,7 @@ public:
     };
     QStringList paths {path_};
     QStringList keys {key (path_)};
-    for (auto const& file : configuration_->supplemental_history_files ())
+    for (auto const& file : history_files ())
       {
         auto const k = key (file);
         if (keys.contains (k, Qt::CaseSensitive)) continue;
@@ -1242,7 +1250,7 @@ public:
       prefixes_.reload (configuration_);
     }
     PerformanceTrace::milestone (loader_run_, "logbook.load_started");
-    async_loader_ = QtConcurrent::run ([primary = path_, files = configuration_->supplemental_history_files (),
+    async_loader_ = QtConcurrent::run ([primary = path_, files = history_files (),
                                        folders = configuration_->supplemental_history_folders (), prefixes = &prefixes_,
                                        run = loader_run_, stop = &stop_requested_] {
         // Baseline for the change check, taken before anything is read so that a
@@ -1260,6 +1268,7 @@ public:
   PerformanceTrace::Phase construction_trace_;
   Configuration const * configuration_;
   QString path_;
+  QString const dxc_history_path_;
   QHash<QString, file_signature> watched_;
   QTimer * poll_timer_ {nullptr};
   QFutureWatcher<poll_result> poll_watcher_;

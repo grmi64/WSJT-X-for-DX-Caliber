@@ -350,6 +350,13 @@ namespace
 void DisplayText::insertText(QString const& text, QColor bg, QColor fg
                              , QString const& call1, QString const& call2, QTextCursor::MoveOperation location)
 {
+  insertFormattedText (text, bg, fg, call1, call2, location, {});
+}
+
+void DisplayText::insertFormattedText (QString const& text, QColor bg, QColor fg,
+                                       QString const& call1, QString const& call2,
+                                       QTextCursor::MoveOperation location, CountryHighlight const& country)
+{
   auto const preserve_view = stickyScrollEnabled () && !following_live_activity_;
   QTextCursor view_anchor;
   int anchor_offset {0};
@@ -385,6 +392,7 @@ void DisplayText::insertText(QString const& text, QColor bg, QColor fg
       cursor.setBlockCharFormat (format);
     }
 
+  auto const line_start = cursor.position ();
   int text_index {0};
   auto temp_format = format;
   if (call1.size ())
@@ -433,6 +441,16 @@ void DisplayText::insertText(QString const& text, QColor bg, QColor fg
         }
     }
   cursor.insertText(text.mid (text_index), format);
+  if (country.length > 0 && (country.background.isValid () || country.foreground.isValid ()))
+    {
+      QTextCharFormat country_format;
+      if (country.background.isValid ()) country_format.setBackground (country.background);
+      if (country.foreground.isValid ()) country_format.setForeground (country.foreground);
+      auto selection = cursor;
+      selection.setPosition (line_start + country.start);
+      selection.setPosition (line_start + country.start + country.length, QTextCursor::KeepAnchor);
+      selection.mergeCharFormat (country_format);
+    }
 
   // position so viewport scrolled to left
   cursor.movePosition (QTextCursor::StartOfLine);
@@ -663,6 +681,7 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
   auto const& dxGrid = facts.grid;
   message = message.left (message.indexOf (QChar::Nbsp)).trimmed (); // strip appended info
   QString extra;
+  CountryHighlight country;
   QString state;    // NJ0A -- populated only when GridMap() is enabled; drives
                      // both the entity-name override below and the trailing
                      // state code appended at the end of this function.
@@ -754,16 +773,24 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
       if (m_config->show_country_names())
         {
           auto const& looked_up = dxRecord;
+          QString country_name;
           if (m_bPrincipalPrefix) {
               extra += looked_up.identity (entity_view).primary_prefix;
           } else if (!state.isEmpty () || entityMismatch) {
               // Same reasoning as the CQ-line case above: a grid-derived
               // U.S. state overrides the callsign's own DXCC entity name.
-              extra += "U.S.A.";
+              country_name = "U.S.A.";
           } else {
-              extra += looked_up.display_name (entity_view);
+              country_name = looked_up.display_name (entity_view);
           }
-          message = leftJustifyAppendage(message, extra);
+          message = leftJustifyAppendage (message, extra + country_name);
+          if (displayDXCCEntity && !is_73 && !m_bDisplayPoints && !country_name.isEmpty ()
+              && m_config->highlight_all_messages ())
+            {
+              country.length = country_name.size ();
+              country.start = message.size () - country.length;
+              set_colours (m_config, &country.background, &country.foreground, facts.highlights);
+            }
         }
       else
         {
@@ -845,7 +872,7 @@ bool DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
     }
   }
 
-  insertText (message.trimmed (), bg, fg, decodedText.call (), dxCall);
+  insertFormattedText (message.trimmed (), bg, fg, decodedText.call (), dxCall, QTextCursor::End, country);
   return true;
 }
 

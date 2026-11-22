@@ -6,6 +6,8 @@
 QString revision (QString const& svn_rev_string = QString {});
 QString display_revision ();
 QString version (bool include_patch = true);
+QString dxc_application_name ();
+QString dxc_display_version ();
 QString program_title (QString const& revision = QString {});
 // Same as program_title(), plus a ™ mark -- only for the three main-window
 // titles (widgets/map65/qmap mainwindow.cpp), not the general-purpose

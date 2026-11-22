@@ -2,15 +2,69 @@
 
 #include <QAction>
 #include <QColorDialog>
+#include <QPainter>
+#include <QStyle>
+#include <QStyledItemDelegate>
 
 #include "models/DecodeHighlightingModel.hpp"
 #include "MessageBox.hpp"
 
 #include "moc_DecodeHighlightingListView.cpp"
 
+namespace
+{
+  class HighlightRuleDelegate final : public QStyledItemDelegate
+  {
+  public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint (QPainter * painter, QStyleOptionViewItem const& option,
+                QModelIndex const& index) const override
+    {
+      QStyledItemDelegate::paint (painter, option, index);
+
+      QStyleOptionViewItem item {option};
+      initStyleOption (&item, index);
+      if (!item.features.testFlag (QStyleOptionViewItem::HasCheckIndicator) || !item.widget)
+        {
+          return;
+        }
+
+      // Use the same indicator rectangle Qt uses for mouse input. Draw the
+      // indicator over the row swatch, since some macOS styles omit its border.
+      auto const indicator = item.widget->style ()->subElementRect (
+        QStyle::SE_ItemViewItemCheckIndicator, &item, item.widget);
+      auto const size = qMin (indicator.width (), indicator.height ());
+      if (size < 4) return;
+      QRectF box {0, 0, size - 1.5, size - 1.5};
+      box.moveCenter (QRectF {indicator}.center ());
+      auto const checked = item.checkState == Qt::Checked;
+      painter->save ();
+      painter->setRenderHint (QPainter::Antialiasing);
+      painter->setPen (QPen {QColor {"#182535"}, 1.25});
+      painter->setBrush (checked ? QColor {"#075eb5"} : Qt::white);
+      painter->drawRoundedRect (box, 2, 2);
+      if (checked)
+        {
+          auto const x = box.x ();
+          auto const y = box.y ();
+          auto const width = box.width ();
+          painter->setPen (QPen {Qt::white, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin});
+          QPointF const tick[] {{x + .22 * width, y + .50 * width},
+                                {x + .43 * width, y + .71 * width},
+                                {x + .80 * width, y + .29 * width}};
+          painter->drawPolyline (tick, 3);
+        }
+      painter->restore ();
+    }
+  };
+}
+
 DecodeHighlightingListView::DecodeHighlightingListView (QWidget * parent)
   : QListView {parent}
 {
+  setItemDelegate (new HighlightRuleDelegate {this});
+
   auto * fg_colour_action = new QAction {tr ("&Foreground color ..."), this};
   addAction (fg_colour_action);
   connect (fg_colour_action, &QAction::triggered, [this] (bool /*checked*/) {

@@ -201,6 +201,14 @@ QDir resolve_installed_data_directory (QString const& application_directory,
     }
 
   QDir application {application_directory};
+  auto const contents_marker = QStringLiteral (".app/Contents/");
+  auto const bundle_contents = configured_data_destination.indexOf (contents_marker);
+  if (bundle_contents >= 0 && application.path ().endsWith (".app/Contents/MacOS"))
+    {
+      auto const resource_path = configured_data_destination.mid (bundle_contents + contents_marker.size ());
+      if (resource_path.startsWith ("Resources/"))
+        return QDir {QDir::cleanPath (application.absoluteFilePath ("../" + resource_path))};
+    }
   auto const destination = QDir::cleanPath (
     application.absoluteFilePath (relative_application_root + QChar {'/'} + configured_data_destination));
   return QDir {destination};

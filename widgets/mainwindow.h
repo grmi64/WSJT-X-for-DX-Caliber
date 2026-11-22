@@ -1089,6 +1089,10 @@ private:
   WSPRBandHopping m_WSPR_band_hopping;
   BeaconTx::Controller m_beaconTxController;
   MessageBox m_rigErrorMessageBox;
+  static constexpr int rig_warning_recovered = -2;
+  QAbstractButton * m_saveRigDiagnosticButton {};
+  void saveRigDiagnosticReport ();
+  void importWsSuitePreferences ();
   QScopedPointer<SampleDownloader> m_sampleDownloader;
   QScopedPointer<EqualizationToolsDialog> m_equalizationToolsDialog;
 
@@ -1385,6 +1389,7 @@ private:
   int			m_nsendingsh;
   double	m_onAirFreq0;
   bool		m_first_error;
+  bool m_waitingForHardwareSimplex {false};
 
   char    m_msg[100][80];
 

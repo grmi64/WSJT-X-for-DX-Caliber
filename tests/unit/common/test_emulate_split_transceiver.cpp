@@ -76,6 +76,73 @@ class TestEmulateSplitTransceiver : public QObject
   Q_OBJECT
 
 private:
+  Q_SLOT void physical_split_reports_the_hardware_split_error ()
+  {
+    auto * fake = new FakeTransceiver;
+    EmulateSplitTransceiver transceiver {nullptr, std::unique_ptr<Transceiver> {fake}};
+    QSignalSpy failures {&transceiver, &Transceiver::failure};
+    QSignalSpy updates {&transceiver, &Transceiver::update};
+    Transceiver::TransceiverState state;
+    state.online (true);
+
+    fake->send_update (state, 1);
+    QVERIFY (failures.isEmpty ());
+    QCOMPARE (updates.size (), 1);
+    QVERIFY (!qvariant_cast<Transceiver::TransceiverState> (updates.last ().at (0)).hardware_simplex_confirmed ());
+    state.split (true);
+    fake->send_update (state, 2);
+    QCOMPARE (failures.size (), 1);
+    QCOMPARE (failures.first ().at (0).toString (), EmulateSplitTransceiver::hardware_split_error ());
+    QCOMPARE (updates.size (), 1);
+    state.split (false);
+    fake->send_update (state, 3);
+    QCOMPARE (updates.size (), 2);
+    QVERIFY (qvariant_cast<Transceiver::TransceiverState> (updates.last ().at (0)).hardware_simplex_confirmed ());
+  }
+
+  Q_SLOT void recovery_connection_keeps_polling_until_idle_data_simplex ()
+  {
+    auto * fake = new FakeTransceiver;
+    EmulateSplitTransceiver transceiver {nullptr, std::unique_ptr<Transceiver> {fake}};
+    transceiver.wait_for_hardware_simplex ();
+    QSignalSpy failures {&transceiver, &Transceiver::failure};
+    QSignalSpy updates {&transceiver, &Transceiver::update};
+    Transceiver::TransceiverState state;
+    state.online (true);
+    state.frequency (18100000);
+    state.mode (Transceiver::DIG_U);
+    state.split (true);
+    fake->send_update (state, 1);
+    QVERIFY (failures.isEmpty ());
+    QVERIFY (updates.isEmpty ());
+
+    state.split (false);
+    state.mode (Transceiver::USB);
+    fake->send_update (state, 1);
+    QCOMPARE (updates.size (), 1);
+    state.split (true);
+    fake->send_update (state, 1);
+    QVERIFY (failures.isEmpty ());
+
+    state.split (false);
+    state.mode (Transceiver::DIG_U);
+    state.ptt (true);
+    fake->send_update (state, 1);
+    state.ptt (false);
+    state.split (true);
+    fake->send_update (state, 1);
+    QVERIFY (failures.isEmpty ());
+
+    state.split (false);
+    fake->send_update (state, 1);
+    auto const recovered = qvariant_cast<Transceiver::TransceiverState> (updates.last ().at (0));
+    QVERIFY (recovered.hardware_simplex_confirmed ());
+    QCOMPARE (recovered.mode (), Transceiver::DIG_U);
+    state.split (true);
+    fake->send_update (state, 1);
+    QCOMPARE (failures.size (), 1);
+  }
+
   Q_SLOT void forwards_mode_status_without_changing_its_sequence ()
   {
     auto * fake = new FakeTransceiver;

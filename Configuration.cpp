@@ -1,4 +1,6 @@
 #include "Configuration.hpp"
+#include "WsSuitePreferences.hpp"
+#include "Transceiver/RigDiagnosticReport.hpp"
 #include "FrequencyAdapter.hpp"
 #include "RadioModePolicy.hpp"
 
@@ -225,6 +227,7 @@
 #include "item_delegates/FrequencyDelegate.hpp"
 #include "item_delegates/FrequencyDeltaDelegate.hpp"
 #include "item_delegates/MessageItemDelegate.hpp"
+#include "Transceiver/EmulateSplitTransceiver.hpp"
 #include "Transceiver/TransceiverFactory.hpp"
 #include "Transceiver/Transceiver.hpp"
 #include "models/Bands.hpp"
@@ -761,7 +764,7 @@ private:
   void set_test_ptt_state (TestPttState, QString const& status = {});
   void finish_test_ptt_preparation ();
   void stop_test_ptt ();
-  bool open_rig (bool force = false);
+  bool open_rig (bool force = false, bool wait_for_hardware_simplex = false);
   bool rig_restart_required (TransceiverFactory::ParameterPack const&, bool) const;
   bool tx_inhibit_blocks_rig_restart (TransceiverFactory::ParameterPack const&, bool) const;
   void warn_tx_inhibit_restart_blocked ();
@@ -1039,6 +1042,7 @@ private:
   bool highlight_only_fields_;
   bool include_WAE_entities_;
   bool highlight_73_;
+  bool highlight_all_messages_;
   bool highlight_orange_;
   bool highlight_blue_;
   bool bSpecialOp_;
@@ -1454,6 +1458,7 @@ void Configuration::set_worked_before_status (QString const& status, QString con
 bool Configuration::highlight_only_fields () const {return m_->highlight_only_fields_;}
 bool Configuration::include_WAE_entities () const {return m_->include_WAE_entities_;}
 bool Configuration::highlight_73 () const {return m_->highlight_73_;}
+bool Configuration::highlight_all_messages () const {return m_->highlight_all_messages_;}
 bool Configuration::highlight_orange () const {return m_->highlight_orange_;}
 bool Configuration::highlight_blue () const {return m_->highlight_blue_;}
 bool Configuration::bSpecialOp () const {return m_->bSpecialOp_;}
@@ -1618,6 +1623,19 @@ bool Configuration::radio_mode_ready () const
 bool Configuration::radio_mode_yielded () const
 {
   return m_->configured_mode () != Transceiver::UNK && m_->radio_mode_policy_.yielded ();
+}
+
+bool Configuration::hardware_split_recovery_pending () const
+{
+  return m_->configured_mode () == Transceiver::DIG_U
+    && m_->radio_mode_policy_.waiting_for_hardware_split ();
+}
+
+void Configuration::reconnect_after_hardware_split ()
+{
+  if (!hardware_split_recovery_pending ()) return;
+  RigDiagnosticReport::record (QStringLiteral ("WSJT-X reconnecting to confirm simplex and DATA"));
+  m_->open_rig (false, true);
 }
 
 void Configuration::transceiver_mode (MODE mode)
@@ -2414,6 +2432,7 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   , highlight_only_fields_ {false}
   , include_WAE_entities_ {false}
   , highlight_73_ {false}
+  , highlight_all_messages_ {false}
   , highlight_orange_ {false}
   , highlight_blue_ {false}
   , bSpecialOp_ {false}
@@ -2651,6 +2670,7 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
     ui_->DXCC_check_box,
     ui_->ppfx_check_box,
     ui_->show_country_names_check_box,
+    ui_->highlight_all_messages_check_box,
     ui_->language_combo_box,
     ui_->monitor_off_check_box,
     ui_->enable_VHF_features_check_box,
@@ -2997,6 +3017,7 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
   // this must be done after the default paths above are set
   {
     PerformanceTrace::Phase settings_read {"configuration.settings_read"};
+    WsSuitePreferences::apply_pending (*settings_);
     read_settings ();
   }
   {
@@ -3594,6 +3615,7 @@ void Configuration::impl::initialize_models ()
   ui_->only_fields_check_box->setChecked (highlight_only_fields_);
   ui_->include_WAE_check_box->setChecked (include_WAE_entities_);
   ui_->highlight_73_check_box->setChecked (highlight_73_);
+  ui_->highlight_all_messages_check_box->setChecked (highlight_all_messages_);
   ui_->highlight_orange_check_box->setChecked (highlight_orange_);
   ui_->highlight_blue_check_box->setChecked (highlight_blue_);
   ui_->alternate_erase_button_check_box->setChecked (alternate_erase_button_);
@@ -3919,6 +3941,7 @@ void Configuration::impl::read_settings ()
   highlight_only_fields_ = settings_->value("OnlyFieldsSought", false).toBool ();
   include_WAE_entities_ = settings_->value("IncludeWAEEntities", false).toBool ();
   highlight_73_ = settings_->value("Highlight73", true).toBool ();
+  highlight_all_messages_ = settings_->value ("HighlightAllMessages", false).toBool ();
   highlight_orange_ = settings_->value("HighlightOrange", false).toBool ();
   highlight_blue_ = settings_->value("HighlightBlue", false).toBool ();
   alternate_erase_button_ = settings_->value("AlternateEraseButtonBehavior", true).toBool ();
@@ -3949,8 +3972,9 @@ void Configuration::impl::read_settings ()
   rig_params_.ptt_port = settings_->value ("PTTport").toString ();
   data_mode_ = settings_->value ("DataMode", QVariant::fromValue (data_mode_none)).value<Configuration::DataMode> ();
   bLowSidelobes_ = settings_->value("LowSidelobes",true).toBool();
-  prompt_to_log_ = settings_->value ("PromptToLog", false).toBool ();
-  autoLog_ = settings_->value ("AutoLog", true).toBool ();
+  // New DXC profiles confirm each contact. Keep explicit choices in existing profiles.
+  prompt_to_log_ = settings_->value ("PromptToLog", !settings_->contains ("AutoLog")).toBool ();
+  autoLog_ = settings_->value ("AutoLog", false).toBool ();
   if (prompt_to_log_ && autoLog_) prompt_to_log_ = false;
   contestingOnly_ = settings_->value ("ContestingOnly", true).toBool ();
   ZZ00_ = settings_->value("ZZ00",false).toBool ();
@@ -4013,6 +4037,22 @@ void Configuration::impl::read_settings ()
   udp_interface_names_ = settings_->value ("UDPInterface").toStringList ();
   udp_TTL_ = settings_->value ("UDPTTL", 1).toInt ();
   udp_server_port_ = settings_->value ("UDPServerPort", 2237).toUInt ();
+  auto const dxc_instance = QStringLiteral ("WSJT-X DXC Beta 8 Test");
+  auto const app_name = QCoreApplication::applicationName ();
+  if (app_name == dxc_instance
+      || (QStandardPaths::isTestModeEnabled () && app_name == dxc_instance + " - test"))
+    {
+      bool has_dxc_port = false;
+      auto const dxc_port = qEnvironmentVariableIntValue ("DXC_WSJTX_REPORTING_PORT", &has_dxc_port);
+      if (has_dxc_port && dxc_port > 0 && dxc_port <= 65535 && dxc_port != 58782)
+        {
+          udp_server_name_ = QStringLiteral ("127.0.0.1");
+          udp_server_port_ = dxc_port;
+        }
+      else if (!settings_->contains ("UDPServerPort")
+               || (udp_server_name_ == QStringLiteral ("127.0.0.1") && udp_server_port_ == 58782))
+        udp_server_port_ = 2249;
+    }
   n1mm_server_name_ = settings_->value ("N1MMServer", "127.0.0.1").toString ();
   auto clear_psk_reporter_destination = [this] (QString& host, char const * key) {
       if (is_psk_reporter_destination (host))
@@ -4234,6 +4274,7 @@ void Configuration::impl::write_settings ()
   settings_->setValue ("OnlyFieldsSought", highlight_only_fields_);
   settings_->setValue ("IncludeWAEEntities", include_WAE_entities_);
   settings_->setValue ("Highlight73", highlight_73_);
+  settings_->setValue ("HighlightAllMessages", highlight_all_messages_);
   settings_->setValue ("HighlightOrange", highlight_orange_);
   settings_->setValue ("HighlightBlue", highlight_blue_);
   settings_->setValue ("AlternateEraseButtonBehavior", alternate_erase_button_);
@@ -5180,6 +5221,7 @@ void Configuration::impl::accept ()
   highlight_only_fields_ = ui_->only_fields_check_box->isChecked ();
   include_WAE_entities_ = ui_->include_WAE_check_box->isChecked ();
   highlight_73_ = ui_->highlight_73_check_box->isChecked ();
+  highlight_all_messages_ = ui_->highlight_all_messages_check_box->isChecked ();
   highlight_orange_ = ui_->highlight_orange_check_box->isChecked ();
   highlight_blue_ = ui_->highlight_blue_check_box->isChecked ();
   alternate_erase_button_ = ui_->alternate_erase_button_check_box->isChecked ();
@@ -7405,7 +7447,7 @@ QString Configuration::impl::summarize_transceiver_failure (QString const& reaso
   return summary;
 }
 
-bool Configuration::impl::open_rig (bool force)
+bool Configuration::impl::open_rig (bool force, bool wait_for_hardware_simplex)
 {
   auto result = false;
 
@@ -7440,7 +7482,7 @@ bool Configuration::impl::open_rig (bool force)
           auto const receive_context = cached_rig_state_.receive_context ();
 
           // create a new Transceiver object
-          auto rig = transceiver_factory_.create (rig_data, transceiver_thread_);
+          auto rig = transceiver_factory_.create (rig_data, transceiver_thread_, wait_for_hardware_simplex);
           cached_rig_state_ = Transceiver::TransceiverState {};
           cached_rig_state_.txvolume (txvolume);
           cached_rig_state_.receive_policy (receive_policy);
@@ -7627,6 +7669,7 @@ void Configuration::impl::notify_mode_control (RadioModePolicy::State previous)
 
 void Configuration::impl::send_transceiver (MODE mode)
 {
+  if (mode != Transceiver::UNK && self_->hardware_split_recovery_pending ()) return;
   auto command = cached_rig_state_;
   command.mode (mode);
   auto const sequence = ++transceiver_command_number_;
@@ -7647,6 +7690,7 @@ bool Configuration::impl::prepare_radio_mode ()
   radio_mode_policy_.configure (desired);
   notify_mode_control (previous);
   if (desired == Transceiver::UNK || rig_is_dummy_) return true;
+  if (self_->hardware_split_recovery_pending ()) return false;
   if (radio_mode_policy_.state () == RadioModePolicy::State::Preparing) return true;
   if (radio_mode_policy_.ready () && radio_mode_policy_.has_prepared ()
       && cached_rig_state_.mode () == desired) return true;
@@ -8031,6 +8075,16 @@ void Configuration::impl::handle_transceiver_update (TransceiverState const& sta
   // pass on to clients if current command is processed
   if (sequence_number == transceiver_command_number_)
     {
+      // Fake It marks explicitly confirmed hardware simplex before replacing
+      // the raw split flag with its virtual split state.
+      if (rig_active_ && rig_params_.split_mode == TransceiverFactory::split_mode_emulate
+          && state.hardware_simplex_confirmed ()
+          && state.online () && state.frequency () && !state.ptt () && !state.tune ())
+        {
+          auto const previous = radio_mode_policy_.state ();
+          radio_mode_policy_.confirm_idle_simplex (state.mode ());
+          notify_mode_control (previous);
+        }
       TransceiverState reported_state {state};
       // take off calibration & offset
       reported_state.frequency (frequency_adapter_.decode (RigFrequency::Path::Rx, reported_state.frequency ()));
@@ -8057,7 +8111,17 @@ void Configuration::impl::handle_transceiver_update (TransceiverState const& sta
 void Configuration::impl::handle_transceiver_failure (QString const& reason)
 {
   LOG_ERROR ("handle_transceiver_failure: " << summarize_transceiver_failure (reason));
+  RigDiagnosticReport::record (reason == EmulateSplitTransceiver::hardware_split_error ()
+    ? QStringLiteral ("WSJT-X detected hardware Split on")
+    : QStringLiteral ("Rig control failure"));
   close_rig (true);
+  if (reason == EmulateSplitTransceiver::hardware_split_error ())
+    {
+      auto const previous = radio_mode_policy_.state ();
+      radio_mode_policy_.configure (configured_mode ());
+      radio_mode_policy_.hold_for_hardware_split ();
+      notify_mode_control (previous);
+    }
   ui_->test_PTT_push_button->setChecked (false);
 
   if (isVisible ())
@@ -8073,6 +8137,7 @@ void Configuration::impl::handle_transceiver_failure (QString const& reason)
 
 void Configuration::impl::close_rig (bool failed)
 {
+  radio_mode_policy_.discard_split_recovery_readback ();
   set_test_ptt_state (TestPttState::Idle);
   frequency_adapter_.new_connection ();
   deferred_frequency_retry_scheduled_ = false;

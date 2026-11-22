@@ -400,6 +400,49 @@ private slots:
     QCOMPARE (rendered.mid (decoded.string ().size ()).trimmed (), expected);
   }
 
+  void countryOnlyHighlight_data ()
+  {
+    QTest::addColumn<QString> ("decoded_message");
+    QTest::addColumn<bool> ("enabled");
+    QTest::addColumn<bool> ("highlighted_country");
+    QTest::addColumn<bool> ("highlighted_row");
+    QTest::newRow ("reply enabled") << QString {"W1AAA TA2ABC -10"} << true << true << false;
+    QTest::newRow ("reply disabled") << QString {"W1AAA TA2ABC -10"} << false << false << false;
+    QTest::newRow ("CQ") << QString {"CQ TA2ABC KN40"} << true << false << true;
+    QTest::newRow ("73") << QString {"W1AAA TA2ABC 73"} << true << false << true;
+    QTest::newRow ("RR73") << QString {"W1AAA TA2ABC RR73"} << true << false << true;
+  }
+
+  void countryOnlyHighlight ()
+  {
+    QFETCH (QString, decoded_message);
+    QFETCH (bool, enabled);
+    QFETCH (bool, highlighted_country);
+    QFETCH (bool, highlighted_row);
+    createConfiguration (false, false, true);
+    configuration_.reset ();
+    settings_->setValue ("Configuration/HighlightAllMessages", enabled);
+    configuration_.reset (new Configuration {&network_, QDir {directory_.path ()}, settings_.get (), nullptr});
+    LogBook logbook {configuration_.get ()};
+    QSignalSpy loaded {&logbook, &LogBook::finished_loading};
+    QTRY_VERIFY (!loaded.isEmpty ());
+    DisplayText display;
+    display.set_configuration (configuration_.get ());
+    DecodedText decoded {QString {"060522 -10  0.3  815 ~ %1"}.arg (decoded_message)};
+    QVERIFY (display.displayDecodedText (decoded, "W9ZZZ", "FT8", true, logbook, "20m",
+                                         false, false, false, 0, false, -99, "123 mi"));
+    auto country = display.document ()->find ("Turkey");
+    QVERIFY (!country.isNull ());
+    QCOMPARE (country.charFormat ().hasProperty (QTextFormat::BackgroundBrush), highlighted_country);
+    QCOMPARE (country.blockFormat ().hasProperty (QTextFormat::BackgroundBrush), highlighted_row);
+    for (auto const* outside : {"TA2ABC", "[123 mi]"})
+      {
+        auto span = display.document ()->find (outside);
+        QVERIFY (!span.isNull ());
+        QVERIFY (!span.charFormat ().hasProperty (QTextFormat::BackgroundBrush));
+      }
+  }
+
   void jttyTransmitHighlightDoesNotLeakIntoNewLines_data ()
   {
     QTest::addColumn<QString> ("message");

@@ -611,7 +611,7 @@ class QString;
 namespace NetworkMessage
 {
   // NEVER DELETE MESSAGE TYPES
-  enum Type
+  enum Type : quint32
     {
       Heartbeat,
       Status,
@@ -639,6 +639,18 @@ namespace NetworkMessage
   static_assert (InhibitStatus == 17, "TX-inhibit protocol type must remain 17");
 
   static_assert (TxInhibit == 18, "TX-inhibit command type must remain 18");
+
+  // Private DX Caliber beta protocol, outside the upstream type sequence.
+  // Both use the standard magic, schema and instance ID header. SetTxHz
+  // carries quint32 request ID and audio Hz. TxHzResult carries request ID,
+  // quint8 result (0 applied, 1 busy, 2 invalid mode/range), and actual Tx Hz.
+  quint32 constexpr dxc_set_tx_hz {0x44584301};
+  quint32 constexpr dxc_tx_hz_result {0x44584302};
+  // Request: quint32 nonce, quint8 period (0 even, 1 odd).
+  // Reply: quint32 nonce, quint8 status (0 found, 1 no audio, 2 no gap), quint32 offset.
+  quint32 constexpr dxc_find_gap {0x44584303};
+  quint32 constexpr dxc_gap_result {0x44584304};
+  quint32 constexpr dxc_prepare_call {0x44584305};
 
   quint32 constexpr pulse {15}; // seconds
 

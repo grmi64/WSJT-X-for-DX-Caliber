@@ -14,6 +14,7 @@
 #include <QByteArray>
 #include <QColor>
 #include <QDebug>
+#include <QStandardPaths>
 #include <QtEndian>
 
 #include "NetworkMessage.hpp"
@@ -70,6 +71,7 @@ public:
     : self_ {self}
     , enabled_ {false}
     , id_ {id}
+    , dxc_monitor_port_ {dxc_monitor_port (id)}
     , version_ {version}
     , revision_ {revision}
     , dns_lookup_id_ {-1}
@@ -171,6 +173,28 @@ public:
   void set_server (QString const& server_name, QStringList const& network_interface_names);
   Q_SLOT void host_info_results (QHostInfo);
   void start ();
+  static port_type dxc_monitor_port (QString const& id)
+  {
+    auto const instance = QStringLiteral ("WSJT-X DXC Beta 8 Test");
+    if (id == instance) return 58782;
+    if (QStandardPaths::isTestModeEnabled () && id == instance + " - test")
+      {
+        auto const port = qEnvironmentVariableIntValue ("DXC_WSJTX_TEST_MONITOR_PORT");
+        if (port > 0 && port <= 65535 && port != 58782) return static_cast<port_type> (port);
+      }
+    return 0;
+  }
+  bool is_dxc_monitor (QHostAddress const& sender, port_type port) const
+  {
+    return dxc_monitor_port_ && sender == QHostAddress::LocalHost && port == dxc_monitor_port_;
+  }
+  void send_dxc_monitor (QDataStream const& out, QByteArray const& message)
+  {
+    if (dxc_monitor_port_ && out.status () == QDataStream::Ok
+        && !is_dxc_monitor (server_, server_port_))
+      writeDatagram (message, QHostAddress::LocalHost, dxc_monitor_port_);
+  }
+  bool parse_dxc_message (QByteArray const&, QHostAddress const&, port_type);
   void parse_message (QByteArray const&);
   bool parse_tx_inhibit (QByteArray const&);
   void invalid_inhibit ();
@@ -211,6 +235,7 @@ public:
   QTimer inhibit_invalid_timer_;
   quint64 inhibit_invalid_count_ {0};
   QString id_;
+  port_type dxc_monitor_port_;
   QString version_;
   QString revision_;
   int dns_lookup_id_;
@@ -353,10 +378,58 @@ void MessageClient::impl::pending_datagrams ()
       if (0 <= readDatagram (datagram.data (), datagram.size (), &sender_address, &sender_port))
         {
           TRACE_UDP ("message received from:" << sender_address << "port:" << sender_port);
-          parse_message (datagram);
+          if (!parse_dxc_message (datagram, sender_address, sender_port)
+              && !is_dxc_monitor (sender_address, sender_port))
+            parse_message (datagram);
         }
     }
   if (hasPendingDatagrams ()) QTimer::singleShot (0, this, &impl::pending_datagrams);
+}
+
+bool MessageClient::impl::parse_dxc_message (QByteArray const& message,
+                                         QHostAddress const& sender, port_type port)
+{
+  if (message.size () < 12) return false;
+  auto const bytes = reinterpret_cast<uchar const *> (message.constData ());
+  auto const kind = qFromBigEndian<quint32> (bytes + 8);
+  if (kind == NetworkMessage::dxc_prepare_call)
+    {
+      // Only the configured loopback reporting endpoint can stage a DX call and cycle.
+      if (!enabled_ || !dxc_monitor_port_ || sender != QHostAddress::LocalHost
+          || sender != server_ || port != server_port_ || is_dxc_monitor (sender, port)
+          || message.size () < 29 || qFromBigEndian<quint32> (bytes) != NetworkMessage::Builder::magic)
+        return true;
+      auto const schema = qFromBigEndian<quint32> (bytes + 4);
+      auto const id_size = qFromBigEndian<quint32> (bytes + 12);
+      if ((schema != 2 && schema != 3) || id_size > 1024 || message.size () < 29 + int (id_size)
+          || message.mid (16, int (id_size)) != id_.toUtf8 ()) return true;
+      int const offset = 16 + int (id_size);
+      auto const fields = bytes + offset;
+      int const call_size = message.size () - offset - 10;
+      if (fields[8] > 1 || fields[9] > 1 || call_size > 20) return true;
+      Q_EMIT self_->dxc_prepare_call (qFromBigEndian<quint64> (fields), fields[8] == 0 ? "FT8" : "FT4",
+                                     QString::fromLatin1 (message.constData () + offset + 10, call_size),
+                                     fields[9] == 1);
+      return true;
+    }
+  if (kind != NetworkMessage::dxc_set_tx_hz && kind != NetworkMessage::dxc_gap_result) return false;
+  int const payload_size = kind == NetworkMessage::dxc_set_tx_hz ? 8 : 9;
+
+  // Private commands come only from Radio Monitor, never the reporting server.
+  if (!enabled_ || !is_dxc_monitor (sender, port) || message.size () < 24
+      || qFromBigEndian<quint32> (bytes) != NetworkMessage::Builder::magic) return true;
+  auto const schema = qFromBigEndian<quint32> (bytes + 4);
+  auto const id_size = qFromBigEndian<quint32> (bytes + 12);
+  if ((schema != 2 && schema != 3) || id_size > 1024
+      || message.size () != 16 + int (id_size) + payload_size
+      || message.mid (16, int (id_size)) != id_.toUtf8 ()) return true;
+  auto const fields = bytes + 16 + id_size;
+  auto const request = qFromBigEndian<quint32> (fields);
+  if (kind == NetworkMessage::dxc_set_tx_hz)
+    Q_EMIT self_->dxc_set_tx_hz (request, qFromBigEndian<quint32> (fields + 4));
+  else
+    Q_EMIT self_->dxc_gap_reply (request, fields[4], qFromBigEndian<quint32> (fields + 5));
+  return true;
 }
 
 void MessageClient::impl::invalid_inhibit ()
@@ -674,7 +747,7 @@ void MessageClient::impl::clear_decode_history ()
 
 void MessageClient::impl::heartbeat ()
 {
-   if (server_port_ && !server_.isNull ())
+   if ((server_port_ && !server_.isNull ()) || dxc_monitor_port_)
     {
       QByteArray message;
       NetworkMessage::Builder out {&message, NetworkMessage::Heartbeat, id_, schema_};
@@ -682,6 +755,7 @@ void MessageClient::impl::heartbeat ()
           << version_.toUtf8 () << revision_.toUtf8 ();
       TRACE_UDP ("schema:" << schema_ << "max schema:" << NetworkMessage::Builder::schema_number << "version:" << version_ << "revision:" << revision_);
       send_message (out, message, false, true);
+      send_dxc_monitor (out, message);
       if (inhibit_available ()) send_inhibit_status (true);
     }
 }
@@ -1022,9 +1096,9 @@ void MessageClient::status_update (Frequency f, QString const& mode, QString con
                                    , bool fast_mode, quint8 special_op_mode
                                    , quint32 frequency_tolerance, quint32 tr_period
                                    , QString const& configuration_name
-                                   , QString const& tx_message)
+                                   , QString const& tx_message, bool tx_even)
 {
-  if (m_->server_port_ && !m_->server_.isNull ())
+  if ((m_->server_port_ && !m_->server_.isNull ()) || m_->dxc_monitor_port_)
     {
       QByteArray message;
       NetworkMessage::Builder out {&message, NetworkMessage::Status, m_->id_, m_->schema_};
@@ -1033,9 +1107,34 @@ void MessageClient::status_update (Frequency f, QString const& mode, QString con
           << de_grid.toUtf8 () << dx_grid.toUtf8 () << watchdog_timeout << sub_mode.toUtf8 ()
           << fast_mode << special_op_mode << frequency_tolerance << tr_period << configuration_name.toUtf8 ()
           << tx_message.toUtf8 ();
+      if (m_->dxc_monitor_port_ && m_->server_ == QHostAddress::LocalHost
+          && !m_->is_dxc_monitor (m_->server_, m_->server_port_))
+        out << NetworkMessage::dxc_prepare_call << quint8 (tx_even);
       TRACE_UDP ("frequency:" << f << "mode:" << mode << "DX:" << dx_call << "report:" << report << "Tx mode:" << tx_mode << "tx_enabled:" << tx_enabled << "Tx:" << transmitting << "decoding:" << decoding << "Rx df:" << rx_df << "Tx df:" << tx_df << "DE:" << de_call << "DE grid:" << de_grid << "DX grid:" << dx_grid << "w/d t/o:" << watchdog_timeout << "sub_mode:" << sub_mode << "fast mode:" << fast_mode << "spec op mode:" << special_op_mode << "frequency tolerance:" << frequency_tolerance << "T/R period:" << tr_period << "configuration name:" << configuration_name << "Tx message:" << tx_message);
       m_->send_message (out, message);
+      m_->send_dxc_monitor (out, message);
     }
+}
+
+bool MessageClient::dxc_request_gap (quint32 request, quint8 period)
+{
+  if (!m_->enabled_ || !m_->dxc_monitor_port_) return false;
+  QByteArray message;
+  NetworkMessage::Builder out {&message, static_cast<NetworkMessage::Type> (NetworkMessage::dxc_find_gap),
+                               m_->id_, m_->schema_};
+  out << request << period;
+  return out.status () == QDataStream::Ok
+    && m_->writeDatagram (message, QHostAddress::LocalHost, m_->dxc_monitor_port_) == message.size ();
+}
+
+void MessageClient::dxc_reply_tx_hz (quint32 request, quint8 result, quint32 hz)
+{
+  QByteArray message;
+  NetworkMessage::Builder out {&message, static_cast<NetworkMessage::Type> (NetworkMessage::dxc_tx_hz_result),
+                               m_->id_, m_->schema_};
+  out << request << result << hz;
+  if (m_->dxc_monitor_port_ && out.status () == QDataStream::Ok)
+    m_->writeDatagram (message, QHostAddress::LocalHost, m_->dxc_monitor_port_);
 }
 
 void MessageClient::decode (bool is_new, QTime time, qint32 snr, float delta_time, quint32 delta_frequency
