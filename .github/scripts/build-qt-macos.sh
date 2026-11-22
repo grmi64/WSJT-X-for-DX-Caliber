@@ -77,7 +77,9 @@ archive="${build_root}/qt-everywhere-opensource-src-${QT_VERSION}.tar.xz"
 mkdir -p "$build_root" "$prefix"
 
 echo "Downloading Qt ${QT_VERSION} from ${QT_SOURCE_URL}"
-curl -L --fail --retry 5 --retry-delay 10 -o "$archive" "$QT_SOURCE_URL"
+if [ ! -f "$archive" ]; then
+  curl -L --fail --retry 5 --retry-delay 10 -o "$archive" "$QT_SOURCE_URL"
+fi
 
 actual_sha256="$(macos_qt_sha256_file "$archive")"
 if [ "$actual_sha256" != "$QT_SOURCE_SHA256" ]; then
@@ -109,6 +111,7 @@ configure_args=(
   -prefix "$prefix"
   -nomake examples
   -nomake tests
+  -no-dbus
   -qt-zlib
   -qt-libpng
   -qt-libjpeg
@@ -153,6 +156,15 @@ configure_args=(
   "QMAKE_MACOSX_DEPLOYMENT_TARGET=${deployment_target}"
   "QMAKE_APPLE_DEVICE_ARCHS=${arch}"
 )
+
+# Apple's newer SDKs retain OpenGL and omit the legacy AGL framework.
+sdk="$(xcrun --sdk macosx --show-sdk-path)"
+if [ ! -d "$sdk/System/Library/Frameworks/AGL.framework" ]; then
+  configure_args+=(
+    "QMAKE_INCDIR_OPENGL=/System/Library/Frameworks/OpenGL.framework/Headers"
+    "QMAKE_LIBS_OPENGL=-framework OpenGL"
+  )
+fi
 
 echo "Configuring Qt ${QT_VERSION} for ${arch}, deployment target ${deployment_target}"
 ./configure "${configure_args[@]}"
