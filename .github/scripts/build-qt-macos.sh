@@ -160,10 +160,19 @@ configure_args=(
 # Apple's newer SDKs retain OpenGL and omit the legacy AGL framework.
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
 if [ ! -d "$sdk/System/Library/Frameworks/AGL.framework" ]; then
-  configure_args+=(
-    "QMAKE_INCDIR_OPENGL=/System/Library/Frameworks/OpenGL.framework/Headers"
-    "QMAKE_LIBS_OPENGL=-framework OpenGL"
-  )
+  python3 - "$source_dir/qtbase/mkspecs/common/mac.conf" <<'PATCH_QT'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines(keepends=True)
+index, = (i for i, line in enumerate(lines) if "/AGL.framework/Headers/" in line)
+lines[index - 1] = lines[index - 1].rstrip().removesuffix(chr(92)).rstrip() + chr(10)
+del lines[index]
+original = "".join(lines)
+assert original.count(" -framework AGL") == 1
+path.write_text(original.replace(" -framework AGL", ""))
+PATCH_QT
 fi
 
 echo "Configuring Qt ${QT_VERSION} for ${arch}, deployment target ${deployment_target}"
