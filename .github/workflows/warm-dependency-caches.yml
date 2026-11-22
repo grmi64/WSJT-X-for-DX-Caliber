@@ -1,0 +1,676 @@
+name: Refresh Build Caches
+
+on:
+  push:
+    branches: [develop]
+    # Only a file hashed into a dependency-cache key, or a Linux CI image input,
+    # starts a push run (test_warmer_trigger_policy.py). Other build and
+    # workflow edits wait for the Monday schedule, even when they change a value
+    # a dependency key carries. After changing hamlib_branch, a macOS runner or
+    # deployment_target (literals in the workflows that call the builds, such
+    # as ci.yml, release.yml and this one; `rg -n
+    # 'hamlib_branch|deployment_target|runner:' .github/workflows` lists every
+    # one), dispatch this workflow with targets=macos, and for hamlib_branch also targets=windows; after
+    # changing build-windows.yml's MSYS2 packages or WSJT_WINDOWS_API_FLOOR,
+    # with targets=windows.
+    paths:
+      - ".github/images/linux-ci/**"
+      - ".github/scripts/linux-ci-image-config.sh"
+      - ".github/scripts/linux-ci-image-fingerprint.sh"
+      - ".github/scripts/linux-ci-image-inputs.sh"
+      - ".github/scripts/linux-ccache-compiler-signature.sh"
+      - ".github/scripts/fftw-version.sh"
+      - ".github/scripts/boost-version.sh"
+      - ".github/scripts/build-fftw.sh"
+      - ".github/scripts/build-fftw-smoke-linux.sh"
+      - "tests/dependencies/test_fftw_runtime.c"
+      - ".github/scripts/install-fftw-windows.sh"
+      - ".github/scripts/run-apt-get.sh"
+      - ".github/scripts/build-pfunit-linux.sh"
+      - ".github/scripts/build-hamlib-linux.sh"
+      - ".github/scripts/tsan-linux-deps-config.sh"
+      - ".github/scripts/build-qt-tsan-linux.sh"
+      - ".github/scripts/build-boost-tsan-linux.sh"
+      - ".github/scripts/build-boost-linux.sh"
+      - ".github/scripts/linux-boost-config.sh"
+      - ".github/scripts/linux-boost-validation.sh"
+      - ".github/scripts/boost-log-queue.patch"
+      - ".github/scripts/build-hamlib-tsan-linux.sh"
+      - ".github/scripts/verify-linux-ci-image.sh"
+      - ".github/scripts/verify-tsan-deps-linux.sh"
+      - ".github/scripts/armhf-ci-image-config.sh"
+      - ".github/scripts/armhf-toolchain-config.sh"
+      - ".github/scripts/build-armhf-toolchain-smoke.sh"
+      - ".github/scripts/build-hamlib-armhf-cross.sh"
+      - ".github/scripts/normalize-armhf-sysroot-symlinks.sh"
+      - ".github/scripts/verify-armhf-ci-image.sh"
+      - ".github/scripts/write-armhf-ci-manifest.sh"
+      - ".github/actions/warm-macos-deps/**"
+      - ".github/actions/build-windows-deps/**"
+      - ".github/patches/hamlib-funcube-windows-hid.patch"
+      - ".github/patches/hamlib-windows-precise-time.patch"
+      - ".github/scripts/tests/test_hamlib_funcube_patch.py"
+      - ".github/scripts/tests/test_hamlib_precise_time.c"
+      - ".github/scripts/build-*-macos.sh"
+      - ".github/scripts/build-*-windows.sh"
+      - ".github/scripts/install-*-macos*.sh"
+      - ".github/scripts/macos-qt-cache-key.sh"
+  schedule:
+    - cron: "23 10 * * 1"
+    - cron: "17 9 1 * *"
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Platform caches to warm"
+        required: false
+        type: choice
+        options:
+          - macos-arm64
+          - macos-x86_64
+          - macos
+          - windows
+          - linux
+          - linux-arm64
+          - linux-armhf
+          - linux-asan-ubsan
+          - linux-tsan
+          - linux-images
+          - linux-retention
+          - all
+        default: macos-arm64
+      hamlib_branch:
+        description: "Hamlib branch to build"
+        required: false
+        type: string
+        default: "4.7.2"
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      linux_images: ${{ steps.detect.outputs.linux_images }}
+      linux_arm64: ${{ steps.detect.outputs.linux_arm64 }}
+      linux_armhf: ${{ steps.detect.outputs.linux_armhf }}
+      linux_asan_ubsan: ${{ steps.detect.outputs.linux_asan_ubsan }}
+      retention: ${{ steps.detect.outputs.retention }}
+      windows: ${{ steps.detect.outputs.windows }}
+      macos_arm64: ${{ steps.detect.outputs.macos_arm64 }}
+      macos_x86_64: ${{ steps.detect.outputs.macos_x86_64 }}
+      image_set: ${{ steps.detect.outputs.image_set }}
+      hamlib_branch: ${{ steps.detect.outputs.hamlib_branch }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - id: detect
+        name: Select cache warmers
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          TARGETS: ${{ inputs.targets || '' }}
+          HAMLIB_BRANCH: ${{ inputs.hamlib_branch || '4.7.2' }}
+        run: |
+          set -euo pipefail
+          .github/scripts/validate-ci-inputs.sh
+
+          normal_images=false
+          tsan_images=false
+          retention=false
+          linux_arm64=false
+          linux_armhf=false
+          linux_asan_ubsan=false
+          windows=false
+          macos_arm64=false
+          macos_x86_64=false
+
+          enable_cache_all() {
+            linux_arm64=true
+            linux_armhf=true
+            linux_asan_ubsan=true
+            windows=true
+            macos_arm64=true
+            macos_x86_64=true
+          }
+
+          enable_all() {
+            normal_images=true
+            retention=true
+            enable_cache_all
+          }
+
+          case "$EVENT_NAME" in
+            schedule)
+              retention=true
+              # Refresh the promoted image monthly only when no newer refresh occurred.
+              if [ "$SCHEDULE" = "17 9 1 * *" ] && \
+                python3 .github/scripts/should-refresh-linux-ci-images.py --max-age-days 30; then
+                normal_images=true
+                tsan_images=true
+              elif [ "$SCHEDULE" = "23 10 * * 1" ]; then
+                enable_cache_all
+              fi
+              ;;
+            workflow_dispatch)
+              case "$TARGETS" in
+                all)
+                  enable_all
+                  ;;
+                linux|linux-images)
+                  normal_images=true
+                  linux_arm64=true
+                  ;;
+                linux-arm64)
+                  linux_arm64=true
+                  ;;
+                linux-armhf)
+                  linux_armhf=true
+                  ;;
+                linux-asan-ubsan)
+                  linux_asan_ubsan=true
+                  ;;
+                linux-tsan)
+                  tsan_images=true
+                  ;;
+                linux-retention)
+                  retention=true
+                  ;;
+                windows)
+                  windows=true
+                  ;;
+                macos)
+                  macos_arm64=true
+                  macos_x86_64=true
+                  ;;
+                macos-arm64)
+                  macos_arm64=true
+                  ;;
+                macos-x86_64)
+                  macos_x86_64=true
+                  ;;
+                *)
+                  echo "::error::Unsupported targets input: $TARGETS"
+                  exit 2
+                  ;;
+              esac
+              ;;
+            push)
+              if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+                base="$BEFORE_SHA"
+              else
+                base="${CURRENT_SHA}^"
+              fi
+
+              if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth=1 origin "$base" || true
+              fi
+
+              if git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                changed="$(git diff --name-only "$base" "$CURRENT_SHA")"
+              else
+                echo "::notice::Could not compare $base..$CURRENT_SHA; warming all dependency caches"
+                changed=""
+                enable_all
+                tsan_images=true
+              fi
+
+              while IFS= read -r path; do
+                [ -n "$path" ] || continue
+                case "$path" in
+                  .github/scripts/fftw-version.sh|.github/scripts/boost-version.sh)
+                    enable_cache_all
+                    normal_images=true
+                    tsan_images=true
+                    ;;
+                  .github/scripts/boost-log-queue.patch)
+                    enable_cache_all
+                    ;;
+                  .github/actions/build-windows-deps/*|.github/scripts/build-boost-windows.sh|.github/scripts/build-pfunit-windows.sh|.github/scripts/build-hamlib-windows.sh|.github/scripts/install-fftw-windows.sh|.github/patches/hamlib-funcube-windows-hid.patch|.github/patches/hamlib-windows-precise-time.patch|.github/scripts/tests/test_hamlib_funcube_patch.py|.github/scripts/tests/test_hamlib_precise_time.c)
+                    windows=true
+                    ;;
+                  .github/actions/warm-macos-deps/*|.github/scripts/build-*-macos.sh|.github/scripts/install-*-macos*.sh|.github/scripts/macos-qt-cache-key.sh)
+                    macos_arm64=true
+                    macos_x86_64=true
+                    ;;
+                esac
+                case "$(.github/scripts/is-linux-ci-image-input.sh --classify "$path")" in
+                  normal)
+                    normal_images=true
+                    ;;
+                  tsan)
+                    tsan_images=true
+                    ;;
+                  normal-and-tsan)
+                    normal_images=true
+                    tsan_images=true
+                    ;;
+                esac
+              done <<< "$changed"
+              ;;
+            *)
+              echo "::error::Unsupported event: $EVENT_NAME"
+              exit 2
+              ;;
+          esac
+
+          if [ "$normal_images" = true ] && [ "$tsan_images" = true ]; then
+            image_set=normal-and-tsan
+          elif [ "$normal_images" = true ]; then
+            image_set=normal
+          elif [ "$tsan_images" = true ]; then
+            image_set=tsan
+          else
+            image_set=none
+          fi
+          linux_images=false
+          if [ "$image_set" != none ]; then
+            linux_images=true
+          fi
+
+          VERSION=$(awk -F= '$1 == "version" {print $2; exit}' release-state.txt)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not derive VERSION from release-state.txt"
+            exit 1
+          fi
+
+          {
+            echo "linux_images=$linux_images"
+            echo "linux_arm64=$linux_arm64"
+            echo "linux_armhf=$linux_armhf"
+            echo "linux_asan_ubsan=$linux_asan_ubsan"
+            echo "retention=$retention"
+            echo "windows=$windows"
+            echo "macos_arm64=$macos_arm64"
+            echo "macos_x86_64=$macos_x86_64"
+            echo "image_set=$image_set"
+            echo "hamlib_branch=$HAMLIB_BRANCH"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Build cache warmer selection"
+            echo
+            echo "| Target | Enabled |"
+            echo "| --- | --- |"
+            echo "| Linux GHCR image set | $image_set |"
+            echo "| Linux arm64 ccache | $linux_arm64 |"
+            echo "| Linux ARMHF ccache (standalone) | $linux_armhf |"
+            echo "| Linux ASan/UBSan ccache (standalone) | $linux_asan_ubsan |"
+            echo "| Linux GHCR retention | $retention |"
+            echo "| Windows x86_64 | $windows |"
+            echo "| macOS arm64 | $macos_arm64 |"
+            echo "| macOS x86_64 | $macos_x86_64 |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Normal image refreshes warm ARMHF and ASan/UBSan after promotion instead of running the standalone warmers." >> "$GITHUB_STEP_SUMMARY"
+
+  refresh-linux-images:
+    needs: detect
+    if: >-
+      needs.detect.outputs.image_set == 'normal' ||
+      needs.detect.outputs.image_set == 'normal-and-tsan'
+    uses: ./.github/workflows/publish-linux-ci-images.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      # ARMHF is part of the normal Linux image cohort. The reusable publisher
+      # validates and promotes its paired images before dependent builds resolve them.
+      promote: true
+      include_armhf: true
+      image_set: normal
+
+  refresh-tsan-image:
+    needs: detect
+    if: >-
+      needs.detect.outputs.image_set == 'tsan' ||
+      needs.detect.outputs.image_set == 'normal-and-tsan'
+    uses: ./.github/workflows/publish-linux-ci-images.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      promote: true
+      include_armhf: false
+      image_set: tsan
+
+  retain-linux-images:
+    needs: [detect, refresh-linux-images]
+    if: >-
+      always() &&
+      needs.detect.outputs.retention == 'true' &&
+      (needs.refresh-linux-images.result == 'success' ||
+       needs.refresh-linux-images.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: linux-ci-image-publishing-normal
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - name: Apply GHCR retention
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLY: ${{ github.event_name == 'schedule' }}
+        shell: bash
+        run: |
+          args=(
+            --owner WSJTX
+            --max-age-days 60
+            --keep 3
+            --package wsjtx-internal/linux-noble
+            --package wsjtx-internal/linux-arm64-bookworm
+            --package wsjtx-internal/linux-armhf-cross-bookworm
+            --package wsjtx-internal/linux-armv7-bookworm
+            --package wsjtx-internal/linux-armhf-cross-trixie
+            --package wsjtx-internal/linux-armv7-trixie
+          )
+          if [ "$APPLY" = true ]; then
+            args+=(--apply)
+          fi
+          .github/scripts/ghcr_retention.py "${args[@]}"
+
+  retain-tsan-image:
+    needs: [detect, refresh-tsan-image]
+    if: >-
+      always() &&
+      needs.detect.outputs.retention == 'true' &&
+      (needs.refresh-tsan-image.result == 'success' ||
+       needs.refresh-tsan-image.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: linux-ci-image-publishing-tsan
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - name: Apply GHCR retention
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLY: ${{ github.event_name == 'schedule' }}
+        shell: bash
+        run: |
+          args=(
+            --owner WSJTX
+            --max-age-days 60
+            --keep 3
+            --package wsjtx-internal/linux-tsan-noble
+          )
+          if [ "$APPLY" = true ]; then
+            args+=(--apply)
+          fi
+          .github/scripts/ghcr_retention.py "${args[@]}"
+
+  warm-linux-arm64-ccache:
+    concurrency:
+      group: warm-linux-arm64-ccache-${{ github.ref }}
+      cancel-in-progress: false
+    needs: detect
+    if: >-
+      github.ref == 'refs/heads/develop' &&
+      needs.detect.outputs.linux_arm64 == 'true' &&
+      needs.detect.outputs.image_set != 'normal' &&
+      needs.detect.outputs.image_set != 'normal-and-tsan'
+    uses: ./.github/workflows/build-linux.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      version: ${{ needs.detect.outputs.version }}
+      hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+      arch: aarch64
+      save_ccache: true
+      artifact_retention_days: 1
+
+  warm-linux-armhf-ccache:
+    needs: detect
+    if: >-
+      github.ref == 'refs/heads/develop' &&
+      needs.detect.outputs.linux_armhf == 'true' &&
+      needs.detect.outputs.image_set != 'normal' &&
+      needs.detect.outputs.image_set != 'normal-and-tsan'
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [bookworm, trixie]
+    uses: ./.github/workflows/build-linux.yml
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: armhf-ccache-develop-${{ matrix.distro }}
+      cancel-in-progress: false
+    with:
+      version: ${{ needs.detect.outputs.version }}
+      hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+      arch: armhf
+      armhf_distro: ${{ matrix.distro }}
+      armhf_build_only: true
+      allow_stale_image: false
+      recache: false
+      save_ccache: true
+      artifact_retention_days: 1
+
+  warm-linux-asan-ubsan-ccache:
+    needs: detect
+    if: >-
+      github.ref == 'refs/heads/develop' &&
+      needs.detect.outputs.linux_asan_ubsan == 'true' &&
+      needs.detect.outputs.image_set != 'normal' &&
+      needs.detect.outputs.image_set != 'normal-and-tsan'
+    uses: ./.github/workflows/build-linux-sanitizers.yml
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: asan-ubsan-ccache-develop
+      cancel-in-progress: false
+    with:
+      hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+      sanitizer: asan-ubsan
+      run_tests: false
+      allow_stale_image: false
+      recache: false
+      save_ccache: true
+
+  warm-windows-x86_64-deps:
+    concurrency:
+      group: warm-windows-x86_64-deps-${{ github.ref }}
+      cancel-in-progress: false
+    needs: detect
+    if: needs.detect.outputs.windows == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Disable core.autocrlf before checkout
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      # Boost is source-built by build-windows-deps so the Windows 7 API floor
+      # and Boost.Atomic patch stay pinned; do not install MSYS2 Boost here.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          cache: true
+          install: >-
+            git make tar curl zstd patch
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-libgomp
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-pkg-config
+            autoconf automake libtool
+
+      - uses: ./.github/actions/build-windows-deps
+        with:
+          hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+          save_caches: "true"
+
+  warm-windows-ccache:
+    concurrency:
+      group: warm-windows-ccache-${{ github.ref }}
+      cancel-in-progress: false
+    needs: [detect, warm-windows-x86_64-deps]
+    if: needs.detect.outputs.windows == 'true'
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+      hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+      save_ccache: true
+      artifact_retention_days: 1
+
+  warm-macos-arm64-deps:
+    concurrency:
+      group: warm-macos-arm64-deps-${{ github.ref }}
+      cancel-in-progress: false
+    needs: detect
+    if: needs.detect.outputs.macos_arm64 == 'true'
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/warm-macos-deps
+        with:
+          arch: arm64
+          runner: macos-15
+          deployment_target: "11.0"
+          hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+
+  warm-macos-x86_64-deps:
+    concurrency:
+      group: warm-macos-x86_64-deps-${{ github.ref }}
+      cancel-in-progress: false
+    needs: detect
+    if: needs.detect.outputs.macos_x86_64 == 'true'
+    runs-on: macos-15-intel
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/warm-macos-deps
+        with:
+          arch: x86_64
+          runner: macos-15-intel
+          deployment_target: "10.13"
+          hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+
+  warm-macos-arm64-ccache:
+    concurrency:
+      group: warm-macos-arm64-ccache-${{ github.ref }}
+      cancel-in-progress: false
+    needs: [detect, warm-macos-arm64-deps]
+    if: needs.detect.outputs.macos_arm64 == 'true'
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+      hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+      arch: arm64
+      runner: macos-15
+      deployment_target: "11.0"
+      save_ccache: true
+      artifact_retention_days: 1
+
+  warm-macos-x86_64-ccache:
+    concurrency:
+      group: warm-macos-x86_64-ccache-${{ github.ref }}
+      cancel-in-progress: false
+    needs: [detect, warm-macos-x86_64-deps]
+    if: needs.detect.outputs.macos_x86_64 == 'true'
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+      hamlib_branch: ${{ needs.detect.outputs.hamlib_branch }}
+      arch: x86_64
+      runner: macos-15-intel
+      deployment_target: "10.13"
+      save_ccache: true
+      artifact_retention_days: 1
+
+  # Keeps the newest develop entry per Linux ccache configuration. Pruning is
+  # housekeeping, so its failure must not fail the warmer. Only an image
+  # refresh saves a Linux x86_64 entry here, so the prune skips its check that
+  # develop CI's save for this commit landed.
+  prune-linux-ccache:
+    needs:
+      - detect
+      - refresh-linux-images
+      - refresh-tsan-image
+      - warm-linux-arm64-ccache
+      - warm-linux-armhf-ccache
+      - warm-linux-asan-ubsan-ccache
+    if: always() && !cancelled() && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prune superseded Linux ccache entries
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 .github/scripts/prune_linux_ccache.py
+          --repository ${{ github.repository }}
+          --ref refs/heads/develop
+          --apply
+          --skip-sha-check
+
+  summary:
+    if: always()
+    needs:
+      - detect
+      - refresh-linux-images
+      - refresh-tsan-image
+      - retain-linux-images
+      - retain-tsan-image
+      - warm-linux-arm64-ccache
+      - warm-linux-armhf-ccache
+      - warm-linux-asan-ubsan-ccache
+      - warm-windows-x86_64-deps
+      - warm-windows-ccache
+      - warm-macos-arm64-deps
+      - warm-macos-x86_64-deps
+      - warm-macos-arm64-ccache
+      - warm-macos-x86_64-ccache
+      - prune-linux-ccache
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Summarize cache warmer outcomes
+        env:
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+
+          print("## Cache warmer outcomes\n")
+          print("| Job | Result |")
+          print("| --- | --- |")
+          for name, job in json.loads(os.environ["JOBS"]).items():
+              print(f"| {name} | {job['result']} |")
+          print("\nSkipped jobs did not validate their caches. See each job's cache summary for restore and build details.")
+          PY

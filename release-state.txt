@@ -1,0 +1,5 @@
+version=3.3.0
+channel=BETA
+prerelease=8
+revision=253133ec0fb52f5c97f013c60baf291981302587
+windows_signing=unsigned
