@@ -13,9 +13,17 @@ companion build and is independently versioned from DX Caliber.
 
 ## Build on Apple Silicon
 
-Use macOS 14 or later, Xcode Command Line Tools, Homebrew CMake, Ninja,
-Qt 5, GCC 15, Boost, FFTW, PortAudio, Hamlib, and pkgconf. Run
-`Darwin/dxc/build-macos.sh /absolute/build-directory /absolute/staging-directory`.
-Use the dependency versions and sources listed with the matching binary
-package for release reproduction. Developer ID signing is a distribution step;
-developer builds do not require the publisher's signing credentials.
+Use Xcode, CMake, Ninja and pkg-config. Build the dependencies with the
+upstream macOS recipes in `.github/scripts` and a shared parent directory for
+the prefixes. The app deployment target is macOS 11.0 on arm64. Use the
+checksum-pinned Qt and Boost sources, the controlled GNU Fortran 14.2
+toolchain, and the WSJT-X macOS recipes for libusb, PortAudio, FFTW and Hamlib.
+Hamlib 4.7.2 can be built with the recipe's configure options from its
+distribution tarball, which already includes the configure script.
+
+Run `Darwin/dxc/build-macos.sh /absolute/build /absolute/staging /absolute/dependencies`.
+The dependency prefixes are `qt-prefix`, `boost-static-prefix`, `fftw-prefix`,
+`libusb-prefix`, `portaudio-prefix`, `hamlib-prefix` and `gfortran-prefix`.
+Review the bundled libraries, static dependencies, and their source and
+license notices before signing. Developer builds do not require the
+publisher's signing credentials.
