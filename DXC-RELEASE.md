@@ -22,7 +22,8 @@ Hamlib 4.7.2 can be built with the recipe's configure options from its
 distribution tarball, which already includes the configure script.
 
 Run `Darwin/dxc/build-macos.sh /absolute/build /absolute/staging /absolute/dependencies`.
-The dependency prefixes are `qt-prefix`, `boost-static-prefix`, `fftw-prefix`,
+From a source archive, set `DXC_RELEASE_REVISION` to the full commit listed
+with the matching release. The dependency prefixes are `qt-prefix`, `boost-static-prefix`, `fftw-prefix`,
 `libusb-prefix`, `portaudio-prefix`, `hamlib-prefix` and `gfortran-prefix`.
 Review the bundled libraries, static dependencies, and their source and
 license notices before signing. Developer builds do not require the

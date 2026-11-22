@@ -5,6 +5,8 @@ source_dir="$(cd "$(dirname "$0")/../.." && pwd)"
 build_dir="${1:?Pass an absolute build directory}"
 output_dir="${2:?Pass an absolute staging directory}"
 deps="${3:?Pass the absolute directory containing the upstream dependency prefixes}"
+revision="${DXC_RELEASE_REVISION:-$(git -C "$source_dir" rev-parse HEAD 2>/dev/null || true)}"
+: "${revision:?Set DXC_RELEASE_REVISION to the full release commit when building from a source archive}"
 deployment_target=11.0
 qt="$deps/qt-prefix"
 boost="$deps/boost-static-prefix"
@@ -28,6 +30,7 @@ export PKG_CONFIG_PATH="$qt/lib/pkgconfig:$boost/lib/pkgconfig:$fftw/lib/pkgconf
 export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
 cmake -S "$source_dir" -B "$build_dir" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  "-DWSJT_SOURCE_REVISION=$revision" \
   "-DCMAKE_OSX_DEPLOYMENT_TARGET=$deployment_target" -DCMAKE_OSX_ARCHITECTURES=arm64 \
   "-DCMAKE_PREFIX_PATH=$qt;$boost;$fftw;$libusb;$portaudio;$hamlib" \
   "-DQt5_DIR=$qt/lib/cmake/Qt5" "-DBOOST_ROOT=$boost" \
